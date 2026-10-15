@@ -1,0 +1,5 @@
+build/
+dist/
+.DS_Store
+shell-win/rsrc_windows_*.syso
+lib-zms/
