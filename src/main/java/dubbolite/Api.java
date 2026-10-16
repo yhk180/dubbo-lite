@@ -89,6 +89,11 @@ final class Api {
                 JmxDoc d = doc(in);
                 return runner.send(d, in.get("nodeId").getAsInt(), session(d));
             }
+            case "cancel": {
+                JsonObject o = new JsonObject();
+                o.addProperty("cancelled", runner.cancel(doc(in), in.get("nodeId").getAsInt()));
+                return o;
+            }
             case "vars": {
                 JsonObject o = new JsonObject();
                 o.add("vars", Json.GSON.toJsonTree(session(doc(in)).vars.snapshot()));
