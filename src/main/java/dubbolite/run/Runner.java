@@ -21,6 +21,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -46,12 +51,63 @@ public final class Runner {
         }
     }
 
+    /** 一次正在进行的发送：可被前端主动中断 */
+    public static final class Call {
+        final CompletableFuture<JsonObject> done = new CompletableFuture<>();
+        final long start = System.currentTimeMillis();
+        volatile boolean cancelled;
+        private Thread worker;
+
+        synchronized void begin() {
+            worker = Thread.currentThread();
+        }
+
+        synchronized void end() {
+            worker = null;
+            // 清除可能残留的中断标记，避免影响线程池中的下一次发送
+            Thread.interrupted();
+        }
+
+        synchronized void cancel() {
+            if (cancelled) {
+                return;
+            }
+            cancelled = true;
+            long now = System.currentTimeMillis();
+            JsonObject o = new JsonObject();
+            o.addProperty("ok", false);
+            o.addProperty("cancelled", true);
+            JsonObject err = new JsonObject();
+            err.addProperty("kind", "已中断");
+            err.addProperty("message", "调用已被手动中断（已等待 " + (now - start) + " ms），本次不执行后置脚本。");
+            o.add("error", err);
+            o.addProperty("elapsed", now - start);
+            o.addProperty("connectMs", 0);
+            o.addProperty("response", "");
+            o.addProperty("size", 0);
+            o.addProperty("time", now);
+            o.add("logs", new JsonArray());
+            done.complete(o);
+            // Dubbo 同步调用在等待响应时可响应中断；ZMS 发送会随之取消
+            if (worker != null) {
+                worker.interrupt();
+            }
+        }
+    }
+
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().serializeNulls()
             .setDateFormat("yyyy-MM-dd HH:mm:ss").create();
 
     private final DubboClient client;
     private final Properties props;
     private final Supplier<ClassLoader> loader;
+    /** 正在进行的发送：docId:nodeId -> Call */
+    private final Map<String, Call> calls = new ConcurrentHashMap<>();
+    private final ExecutorService pool = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "send");
+        t.setDaemon(true);
+        return t;
+    });
 
     public Runner(DubboClient client, Properties props, Supplier<ClassLoader> loader) {
         this.client = client;
@@ -59,13 +115,55 @@ public final class Runner {
         this.loader = loader;
     }
 
-    public JsonObject send(JmxDoc doc, int nodeId, Session session) {
-        synchronized (session) {
-            return doSend(doc, nodeId, session);
+    /**
+     * 在独立线程中执行发送（前置脚本、RpcContext 附件、调用、后置脚本都在同一线程），调用方等待结果；
+     * 被 {@link #cancel} 中断时立即返回“已中断”，后台线程收到中断后自行结束。
+     */
+    public JsonObject send(JmxDoc doc, int nodeId, Session session) throws Exception {
+        String key = doc.id + ":" + nodeId;
+        Call call = new Call();
+        if (calls.putIfAbsent(key, call) != null) {
+            throw new IllegalStateException("该请求正在发送中");
+        }
+        try {
+            pool.execute(() -> {
+                call.begin();
+                try {
+                    JsonObject r = null;
+                    synchronized (session) {
+                        if (!call.cancelled) {
+                            r = doSend(doc, nodeId, session, call);
+                        }
+                    }
+                    call.done.complete(r);
+                } catch (Throwable t) {
+                    call.done.completeExceptionally(t);
+                } finally {
+                    call.end();
+                }
+            });
+            try {
+                return call.done.get();
+            } catch (ExecutionException e) {
+                Throwable c = e.getCause();
+                throw c instanceof Exception ? (Exception) c : new IllegalStateException(c);
+            }
+        } finally {
+            calls.remove(key, call);
         }
     }
 
-    private JsonObject doSend(JmxDoc doc, int nodeId, Session session) {
+    /** @return false 表示该请求当前没有在发送 */
+    public boolean cancel(JmxDoc doc, int nodeId) {
+        Call c = calls.get(doc.id + ":" + nodeId);
+        if (c == null) {
+            return false;
+        }
+        c.cancel();
+        return true;
+    }
+
+    private JsonObject doSend(JmxDoc doc, int nodeId, Session session, Call call) {
         TNode s = doc.node(nodeId);
         if (!"dubbo".equals(s.kind) && !"zms".equals(s.kind)) {
             throw new IllegalArgumentException("只能发送 Dubbo / ZMS 请求");
@@ -150,7 +248,7 @@ public final class Runner {
         }
 
         if ("zms".equals(s.kind)) {
-            return sendZms(s, scope, baseDir, fn, vars, session, log, out, request);
+            return sendZms(s, scope, baseDir, fn, vars, session, log, out, request, call);
         }
 
         // 3. 字段 + Dubbo Defaults（最近的配置优先，仅填充空字段）
@@ -244,9 +342,9 @@ public final class Runner {
             String[] types;
             Object[] values;
             if (dandelion) {
-                Dandelions.Call call = Dandelions.build(s, fn, loader.get());
-                types = call.types;
-                values = call.values;
+                Dandelions.Call dc = Dandelions.build(s, fn, loader.get());
+                types = dc.types;
+                values = dc.values;
                 Dandelions.applyAppid(resolved.get("appidKey"), values, log);
             } else {
                 DubboParamDto params;
@@ -302,6 +400,10 @@ public final class Runner {
         result.setResponseData(ok ? response : out.getAsJsonObject("error").get("message").getAsString());
         result.setResponseCode(ok ? "200" : "500");
         result.setResponseMessage(ok ? "OK" : "ERROR");
+        if (call.cancelled) {
+            // 结果已作废（前端已收到“已中断”），不再执行后置脚本
+            return out;
+        }
 
         // 6. 后置处理器
         for (TNode c : scope) {
@@ -315,7 +417,7 @@ public final class Runner {
 
     /** ZMS 消息：与插件 com.zto.zmsjmeter.ZMSSampler 一致（syncSend 返回码 200 为成功；sendOneWay 无响应） */
     private JsonObject sendZms(TNode s, List<TNode> scope, Path baseDir, Functions fn, Vars vars, Session session,
-                               ScriptLog log, JsonObject out, JsonObject request) {
+                               ScriptLog log, JsonObject out, JsonObject request, Call call) {
         Map<String, String> raw = new LinkedHashMap<>();
         for (String k : JmxDoc.ZMS_FIELDS) {
             raw.put(k, s.prop(k));
@@ -393,6 +495,9 @@ public final class Runner {
         result.setResponseData(ok ? response : out.getAsJsonObject("error").get("message").getAsString());
         result.setResponseCode(ok ? "200" : "500");
         result.setResponseMessage(ok ? "OK" : "ERROR");
+        if (call.cancelled) {
+            return out;
+        }
         for (TNode c : scope) {
             if ("post".equals(c.kind)) {
                 runScript(c, baseDir, fn, bindings(vars, result, sampler, log), log);

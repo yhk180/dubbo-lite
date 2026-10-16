@@ -7,6 +7,7 @@
 - 支持 `${变量}`、常用 JMeter 函数（`__Random`/`__time`/`__timeShift`/`__UUID`/`__RandomString`/`__counter`/`__digest` 等）、用户定义变量、CSV 数据文件、BeanShell/JSR223 前置与后置脚本（`vars`/`props`/`log`/`prev`/`sampler`/`ctx`，`RpcContext.setAttachment` 可用）
 - 支持 dandelion 插件的 JavaSampler Dubbo 请求（`mm.jmeter.duser.SgrDubbo` / `DubboApp`，含 appidKey 签名）
 - 支持 ZMS 消息（`com.zto.zmsjmeter.ZMSSampler`，syncSend / sendOneWay）；ZMS 客户端放在 `lib-zms/`，用独立类加载器加载，不与 Dubbo 依赖冲突
+- 调用中可随时中断（点“中断”或按 `Esc`）：Dubbo 中断等待中的调用线程，ZMS 取消发送；被中断的请求不执行后置脚本
 - 不做：HTTP、线程组并发、压测、断言、监听器（这些元素在树中只读显示或隐藏，保存时原样保留）
 
 ## 使用
@@ -17,7 +18,7 @@
 | Windows 原生应用 | 解压 `dist/DubboLite-windows.zip`，双击 `DubboLite.exe`（WebView2 窗口；没有 WebView2 时自动改用 Edge 独立窗口） |
 | 任意平台 | `dist/dubbo-lite/dubbo-lite.sh [文件.jmx]` / `dubbo-lite.bat`（以 Chrome/Edge 无地址栏窗口打开） |
 
-需要本机安装 Java 8+（优先使用 Java 8）。快捷键：`⌘↵` 发送、`⌘S` 保存、`⌘O` 打开、`⌘K` 搜索。
+需要本机安装 Java 8+（优先使用 Java 8）。快捷键：`⌘↵` 发送、`Esc` 中断、`⌘S` 保存、`⌘O` 打开、`⌘K` 搜索。
 
 ## 与 JMeter 的差异（有意为之）
 

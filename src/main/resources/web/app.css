@@ -337,7 +337,8 @@ textarea.input { height: auto; padding: 8px 10px; resize: vertical; line-height:
 .item:hover { border-color: var(--line-strong); background: var(--panel); }
 .item .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item .sub { color: var(--faint); font-size: 12px; }
-.item.off { opacity: .5; }
+.item.off > :not(.switch) { opacity: .5; }
+.item.off .grow { text-decoration: line-through; text-decoration-color: var(--faint); }
 
 /* ---------------------------------------------------------------- response */
 .hresizer { height: 7px; margin: -3px 0 -4px; cursor: row-resize; flex: none; position: relative; z-index: 4; }
@@ -444,3 +445,13 @@ textarea.input { height: auto; padding: 8px 10px; resize: vertical; line-height:
 .toast.err { background: var(--err); }
 @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
 .empty-main { flex: 1; display: grid; place-items: center; color: var(--faint); }
+
+/* ---------------------------------------------------------------- 中断 / 下拉框 */
+.send.stop { background: var(--err); cursor: pointer; }
+.send.stop:hover { background: var(--err); filter: brightness(.92); }
+.sdot.cancel { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+.stat.warn { color: var(--warn); font-weight: 600; }
+select.input { cursor: pointer; padding-right: 6px; }
+.switch.sm .tr { width: 26px; height: 15px; }
+.switch.sm .tr::after { width: 11px; height: 11px; }
+.switch.sm.on .tr::after { transform: translateX(11px); }

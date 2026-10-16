@@ -121,6 +121,10 @@ final class ZmsClient {
         } catch (TimeoutException e) {
             f.cancel(true);
             throw new IllegalStateException("发送超过 " + timeoutSec + " 秒没有结果：请检查 ZK 地址与网络");
+        } catch (InterruptedException e) {
+            // 用户主动中断
+            f.cancel(true);
+            throw e;
         } catch (java.util.concurrent.ExecutionException e) {
             Throwable c = e.getCause();
             while ((c instanceof InvocationTargetException || c instanceof java.lang.reflect.UndeclaredThrowableException) && c.getCause() != null) {

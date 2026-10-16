@@ -34,6 +34,9 @@ public final class JmxDoc {
     public static final LinkedHashMap<String, String> YAJAD = new LinkedHashMap<>();
     /** 通用字段 -> ningyu 属性名 */
     public static final LinkedHashMap<String, String> NINGYU = new LinkedHashMap<>();
+    /** 可以启用/停用的配置元素（请求本身、分组等不提供启用/停用） */
+    public static final java.util.Set<String> CONFIG_KINDS = new java.util.HashSet<>(
+            java.util.Arrays.asList("defaults", "pre", "post", "csv", "vars"));
     /** 可以从 Dubbo Defaults 继承的连接字段 */
     public static final String[] CONN_FIELDS = {"registryProtocol", "registryAddress", "registryGroup", "rpcProtocol",
             "timeout", "retries", "version", "cluster", "group", "connections", "loadbalance"};
@@ -513,6 +516,9 @@ public final class JmxDoc {
             t.el.setAttr("testname", patch.get("name").getAsString());
         }
         if (patch.has("enabled")) {
+            if (!CONFIG_KINDS.contains(t.kind)) {
+                throw new IllegalArgumentException("只有配置元素可以启用/停用");
+            }
             t.el.setAttr("enabled", String.valueOf(patch.get("enabled").getAsBoolean()));
         }
         if (patch.has("props")) {

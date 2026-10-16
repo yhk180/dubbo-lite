@@ -115,6 +115,8 @@ const S = {
   expanded: {},
   results: new Map(),
   sending: new Map(),
+  /** 发送前（还在提交编辑时）就点了中断的请求 */
+  cancelReq: new Set(),
   filter: '',
   reqTab: 'params',
   respTab: 'body',
@@ -126,8 +128,15 @@ const HIDDEN = new Set(['listener', 'other']);
 /** 可以发送的请求 */
 const SENDABLE = new Set(['dubbo', 'zms']);
 const CONTAINER = new Set(['plan', 'group', 'controller']);
+/** 只有配置元素可以启用/停用（请求本身、分组等不提供） */
+const CONFIG_KINDS = new Set(['defaults', 'pre', 'post', 'csv', 'vars']);
+/**
+ * 在本应用中是否按“已启用”处理：配置元素看自身的启用状态；请求、分组等一律视为启用
+ * （JMX 中的 enabled 属性原样保留，JMeter 读取不受影响）
+ */
+const isOn = n => !CONFIG_KINDS.has(n.kind) || n.enabled;
 const CONN = [
-  ['registryProtocol', '注册中心协议', 'zookeeper', ['zookeeper', 'nacos', 'redis', 'multicast', 'none']],
+  ['registryProtocol', '注册中心协议', 'zookeeper', ['zookeeper', 'nacos', 'redis', 'multicast', ['none', 'none（直连）']]],
   ['registryAddress', '注册中心地址', '10.0.0.1:2181,10.0.0.2:2181'],
   ['registryGroup', '注册中心分组', ''],
   ['rpcProtocol', 'RPC 协议', 'dubbo', ['dubbo', 'rmi', 'hessian', 'http']],
@@ -179,7 +188,7 @@ function applyDoc(j) {
     if (saved) S.expanded[d.id] = new Set(JSON.parse(saved));
     else {
       S.expanded[d.id] = new Set();
-      d.root.children.forEach(c => { if (c.kind === 'group' && c.enabled) S.expanded[d.id].add(c.id); });
+      d.root.children.forEach(c => { if (c.kind === 'group') S.expanded[d.id].add(c.id); });
     }
     const sel = d.path && +localStorage.getItem('dl.sel:' + d.path);
     if (sel && d.byId.has(sel)) S.sel[d.id] = sel;
@@ -609,7 +618,7 @@ function modal({ title, body, buttons }) {
       if (e.key === 'Escape') { e.stopPropagation(); close(null); }
       if (e.key === 'Enter' && !(e.target instanceof HTMLTextAreaElement)) {
         const p = buttons.find(b => b.primary);
-        if (p) { e.preventDefault(); close(p.value); }
+        if (p) { e.preventDefault(); close(typeof p.value === 'function' ? p.value() : p.value); }
       }
     };
     const mask = h('div', { class: 'mask', onmousedown: e => { if (e.target === mask) close(null); } },
@@ -625,6 +634,48 @@ function modal({ title, body, buttons }) {
     const f = mask.querySelector('input,textarea');
     if (f) setTimeout(() => f.focus(), 30);
   });
+}
+
+function promptText(title, value, help) {
+  const input = h('input', { class: 'input', value: value || '', spellcheck: 'false' });
+  return modal({
+    title,
+    body: [input, help ? h('div', { class: 'help', style: { marginTop: '8px' } }, help) : null],
+    buttons: [{ text: '取消', value: null }, { text: '确定', value: () => input.value, primary: true }],
+  });
+}
+const CUSTOM_OPT = '\u0000custom';
+/**
+ * 下拉选择：opts 为值或 [值, 显示文字]；empty 不为 null 时提供“留空”选项。
+ * 列表以外的值（如 ${变量}）会原样保留并显示，也可以通过“自定义…”填写。
+ */
+function selectInput({ value, opts, empty, onPick, cls }) {
+  const sel = h('select', { class: cls || 'input ui' });
+  let cur = value || '';
+  const fill = () => {
+    const list = opts.map(o => (Array.isArray(o) ? o : [o, o]));
+    sel.innerHTML = '';
+    if (empty != null) sel.append(h('option', { value: '' }, empty));
+    list.forEach(([v, t]) => sel.append(h('option', { value: v }, t)));
+    if (cur && !list.some(([v]) => v === cur)) sel.append(h('option', { value: cur }, cur + '（自定义）'));
+    sel.append(h('option', { value: CUSTOM_OPT }, '自定义…'));
+    sel.value = cur;
+  };
+  fill();
+  sel.addEventListener('change', async () => {
+    if (sel.value !== CUSTOM_OPT) {
+      cur = sel.value;
+      onPick(cur);
+      return;
+    }
+    sel.value = cur;
+    const v = await promptText('自定义值', cur, '可以填写列表以外的值，也可以使用 ${变量}');
+    if (v == null) return;
+    cur = v.trim();
+    fill();
+    onPick(cur);
+  });
+  return sel;
 }
 
 /* ------------------------------------------------------------------ native bridge */
@@ -800,6 +851,7 @@ async function removeNode(n) {
   await structural('delete', { nodeId: n.id });
 }
 function toggleEnabled(n) {
+  if (!CONFIG_KINDS.has(n.kind)) return;
   queue(doc(), n, { enabled: !n.enabled });
   renderSide();
   if (S.sel[S.cur] === n.id) renderContent();
@@ -812,20 +864,58 @@ async function sendCurrent() {
 async function send(d, n) {
   const key = resKey(d, n);
   if (S.sending.has(key)) return;
-  S.sending.set(key, performance.now());
+  const started = performance.now();
+  S.cancelReq.delete(key);
+  S.sending.set(key, started);
   updateRowStatus(d, n);
   if (S.sel[d.id] === n.id) renderResp();
   try {
     await flush();
-    const r = await api('send', { docId: d.id, nodeId: n.id });
+    const r = S.cancelReq.has(key)
+      ? { ok: false, cancelled: true, error: { kind: '已中断', message: '调用已被手动中断' }, logs: [], request: null, elapsed: performance.now() - started, time: Date.now() }
+      : await api('send', { docId: d.id, nodeId: n.id });
     S.results.set(key, r);
   } catch (e) {
     S.results.set(key, { ok: false, error: { kind: '发送失败', message: e.message }, logs: [], request: null, vars: null, time: Date.now() });
   } finally {
     S.sending.delete(key);
+    S.cancelReq.delete(key);
     updateRowStatus(d, n);
     if (S.cur === d.id && S.sel[d.id] === n.id) renderResp();
   }
+}
+/** 主动中断正在进行的调用：后台立即返回“已中断”，并中断调用线程 */
+async function cancelSend(d, n) {
+  const key = resKey(d, n);
+  if (!S.sending.has(key)) return;
+  S.cancelReq.add(key);
+  // 请求可能还没到达后台（正在提交编辑），稍后重试
+  for (let i = 0; i < 5 && S.sending.has(key); i++) {
+    try {
+      if ((await api('cancel', { docId: d.id, nodeId: n.id })).cancelled) return;
+    } catch (e) {
+      toast(e.message, true);
+      return;
+    }
+    await new Promise(r => setTimeout(r, 150));
+  }
+}
+function cancelCurrent() {
+  const d = doc();
+  const n = d && d.byId.get(S.sel[d.id]);
+  if (n && S.sending.has(resKey(d, n))) {
+    cancelSend(d, n);
+    return true;
+  }
+  return false;
+}
+/** 发送按钮：发送中变为“中断” */
+function sendButton(d, n) {
+  if (S.sending.has(resKey(d, n))) {
+    return h('button', { class: 'send stop', title: '中断本次调用 (Esc)', onclick: () => cancelSend(d, n) },
+      h('span', { class: 'spinner', style: { borderColor: 'rgba(255,255,255,.3)', borderTopColor: '#fff' } }), '中断', h('span', { class: 'kbd' }, 'Esc'));
+  }
+  return h('button', { class: 'send', title: '发送 (' + MOD + '↵)', onclick: () => send(d, n) }, I('send', 's'), '发送', h('span', { class: 'kbd' }, MOD + '↵'));
 }
 async function showSettings() {
   S.state = await api('state');
@@ -1081,7 +1171,7 @@ function rowStatus(d, n) {
   const key = resKey(d, n);
   if (S.sending.has(key)) return 'run';
   const r = S.results.get(key);
-  return r ? (r.ok ? 'ok' : 'err') : '';
+  return r ? (r.cancelled ? 'cancel' : r.ok ? 'ok' : 'err') : '';
 }
 function updateRowStatus(d, n) {
   if (S.cur !== d.id || !els.tree) return;
@@ -1097,7 +1187,7 @@ function rowEl(d, { n, depth, open }, f) {
   const sel = S.sel[d.id] === n.id;
   const cont = n.kind !== 'plan' && isContainer(n);
   const row = h('div', {
-    class: `row ${n.kind}${sel ? ' sel' : ''}${n.enabled ? '' : ' off'}`,
+    class: `row ${n.kind}${sel ? ' sel' : ''}${isOn(n) ? '' : ' off'}`,
     'data-id': n.id,
     draggable: n.kind === 'plan' ? null : 'true',
     style: { paddingLeft: (n.kind === 'plan' ? 6 : 6 + depth * 16) + 'px' },
@@ -1176,7 +1266,7 @@ function nodeMenu(d, n, x, y) {
   if (n.kind !== 'plan') {
     items.push('-',
       { text: '复制', icon: 'copy', run: () => structural('duplicate', { nodeId: n.id }, true) },
-      { text: n.enabled ? '停用' : '启用', icon: 'power', run: () => toggleEnabled(n) },
+      CONFIG_KINDS.has(n.kind) && { text: n.enabled ? '停用' : '启用', icon: 'power', run: () => toggleEnabled(n) },
       { text: '上移', icon: 'up', run: () => moveBy(d, n, -1) },
       { text: '下移', icon: 'down', run: () => moveBy(d, n, 1) },
       '-',
@@ -1261,10 +1351,17 @@ function titleLine(d, n, extra) {
     },
     onkeydown: e => { if (e.key === 'Enter') e.target.blur(); },
   });
-  const sw = n.kind === 'plan' ? null : h('label', { class: 'switch' + (n.enabled ? ' on' : ''), title: '停用后 JMeter 运行时会跳过它；在这里仍可手动发送' },
+  const sw = !CONFIG_KINDS.has(n.kind) ? null : h('label', { class: 'switch' + (n.enabled ? ' on' : ''), title: '停用后发送时不再生效（JMeter 运行时同样会跳过它）' },
     h('span', null, n.enabled ? '已启用' : '已停用'), h('span', { class: 'tr' }));
   if (sw) sw.addEventListener('click', () => toggleEnabled(n));
   return h('div', { class: 'title-line' }, input, extra, sw);
+}
+/** 配置元素列表中的小开关：点击直接启用/停用，不跳转 */
+function miniSwitch(n) {
+  return h('label', {
+    class: 'switch sm' + (n.enabled ? ' on' : ''), title: n.enabled ? '已启用，点击停用' : '已停用，点击启用',
+    onclick: e => { e.stopPropagation(); toggleEnabled(n); renderContent(); },
+  }, h('span', { class: 'tr' }));
 }
 function crumb(d, n) {
   const anc = ancestors(d, n);
@@ -1285,7 +1382,6 @@ function subtabs(tabs, cur, onPick, right) {
 
 function viewRequest(d, n, c) {
   const { f, from } = effective(d, n);
-  const sending = S.sending.has(resKey(d, n));
   const ifaceInput = h('input', { class: 'iface', value: n.props.interface, placeholder: 'com.example.api.FooService', spellcheck: 'false', oninput: e => { queue(d, n, { props: { interface: e.target.value } }); } });
   const methodInput = h('input', {
     class: 'method', value: n.props.method, placeholder: 'method', spellcheck: 'false',
@@ -1295,9 +1391,7 @@ function viewRequest(d, n, c) {
       if (m) m.textContent = e.target.value;
     },
   });
-  const sendBtn = h('button', { class: 'send', disabled: sending, onclick: () => send(d, n) },
-    sending ? h('span', { class: 'spinner', style: { borderColor: 'rgba(255,255,255,.3)', borderTopColor: '#fff' } }) : I('send', 's'), '发送', h('span', { class: 'kbd' }, MOD + '↵'));
-  els.sendBtn = sendBtn;
+  const sendBtn = els.sendBtn = sendButton(d, n);
 
   const chips = [];
   const chip = (label, value, k, warn) => h('span', { class: 'chip' + (warn ? ' warn' : ''), onclick: () => { S.reqTab = 'conn'; renderContent(); }, title: from[k] ? '继承自 ' + from[k].name : '' },
@@ -1372,9 +1466,6 @@ function hResizer() {
   });
   return r;
 }
-function datalist(id, opts) {
-  return opts ? h('datalist', { id }, opts.map(o => h('option', { value: o }))) : null;
-}
 const DANDELION_FIELDS = [
   ['registryAddress', 'URL（zookeeper://… 注册中心，或 IP:端口 直连）', 'zookeeper://10.0.0.1:2181?backup=10.0.0.2:2181'],
   ['timeout', '超时 (ms)', '3000'],
@@ -1406,10 +1497,13 @@ function connForm(d, n, from) {
   for (const [k, label, ph, opts] of CONN) {
     const inh = from && from[k];
     const placeholder = inh ? inh.props[k] : (isSampler ? (ph ? '默认 ' + ph : '') : ph);
+    const onPick = v => queue(d, n, { props: { [k]: v } });
+    // 协议、集群容错、负载均衡等枚举字段用下拉框选择；留空表示继承 / 使用默认值
+    const ctl = opts
+      ? selectInput({ value: n.props[k] || '', opts, onPick, empty: inh ? '继承：' + inh.props[k] + '（' + inh.name + '）' : isSampler ? '默认（' + ph + '）' : '未设置（默认 ' + ph + '）' })
+      : h('input', { class: 'input', value: n.props[k] || '', placeholder, spellcheck: 'false', oninput: e => onPick(e.target.value) });
     grid.append(h('div', { class: 'field' + (k === 'registryAddress' ? ' wide' : '') },
-      h('label', null, label, inh ? h('span', { class: 'from', title: inh.name }, '继承自 ' + inh.name) : null),
-      h('input', { class: 'input', value: n.props[k] || '', placeholder, list: opts ? 'dl-' + k : null, spellcheck: 'false', oninput: e => queue(d, n, { props: { [k]: e.target.value } }) }),
-      datalist('dl-' + k, opts)));
+      h('label', null, label, inh ? h('span', { class: 'from', title: inh.name }, '继承自 ' + inh.name) : null), ctl));
   }
   const note = isSampler
     ? h('div', { class: 'note', style: { marginBottom: '16px' } }, '留空的字段使用所在分组（或测试计划）中最近的“Dubbo 默认配置”，与 JMeter 的配置元件规则一致。注册中心协议填 ', h('code', null, 'none'), ' 表示直连，地址填 ', h('code', null, 'IP:端口'), '。')
@@ -1428,7 +1522,8 @@ function scopeView(d, n) {
   for (const x of all) {
     const owner = parentOf(d, x);
     list.append(h('div', { class: 'item' + (x.enabled ? '' : ' off'), onclick: () => select(x.id) },
-      badge(x.kind), h('div', { class: 'grow' }, x.name), h('span', { class: 'sub' }, owner === n ? '仅此请求' : '来自 ' + owner.name + (x.enabled ? '' : ' · 已停用'))));
+      badge(x.kind), h('div', { class: 'grow' }, x.name), h('span', { class: 'sub' }, owner === n ? '仅此请求' : '来自 ' + owner.name + (x.enabled ? '' : ' · 已停用')),
+      miniSwitch(x)));
   }
   wrap.append(list,
     h('div', { style: { display: 'flex', gap: '8px', marginTop: '14px' } },
@@ -1457,11 +1552,10 @@ function renderResp() {
   const started = S.sending.get(key);
   const r = S.results.get(key);
   box.innerHTML = '';
-  if (els.sendBtn) {
-    els.sendBtn.disabled = started != null;
-    els.sendBtn.firstChild.replaceWith(started != null
-      ? h('span', { class: 'spinner', style: { borderColor: 'rgba(255,255,255,.3)', borderTopColor: '#fff' } })
-      : I('send', 's'));
+  if (els.sendBtn && els.sendBtn.isConnected) {
+    const b = sendButton(d, n);
+    els.sendBtn.replaceWith(b);
+    els.sendBtn = b;
   }
   const head = h('div', { class: 'resp-head' }, h('span', { class: 'ttl' }, '响应'));
   if (started != null) {
@@ -1469,8 +1563,9 @@ function renderResp() {
     head.append(h('span', { class: 'stat' }, h('span', { class: 'spinner' }), '请求中'), t);
     tickTimer = setInterval(() => { t.textContent = fmtMs(performance.now() - started); }, 97);
   } else if (r) {
-    head.append(h('span', { class: 'stat ' + (r.ok ? 'ok' : 'err') }, h('span', { class: 'sdot ' + (r.ok ? 'ok' : 'err') }), r.ok ? '成功' : '失败'));
-    if (r.elapsed != null && (r.ok || r.elapsed > 0)) head.append(h('span', { class: 'stat', title: '调用耗时（不含建立连接）' }, I('send', 'xs'), fmtMs(r.elapsed)));
+    if (r.cancelled) head.append(h('span', { class: 'stat warn' }, h('span', { class: 'sdot cancel' }), '已中断'));
+    else head.append(h('span', { class: 'stat ' + (r.ok ? 'ok' : 'err') }, h('span', { class: 'sdot ' + (r.ok ? 'ok' : 'err') }), r.ok ? '成功' : '失败'));
+    if (r.elapsed != null && (r.ok || r.elapsed > 0)) head.append(h('span', { class: 'stat', title: r.cancelled ? '中断前已等待' : '调用耗时（不含建立连接）' }, I('send', 'xs'), fmtMs(r.elapsed)));
     if (r.connectMs) head.append(h('span', { class: 'stat', title: '首次调用：连接注册中心并订阅服务的耗时' }, I('plug', 'xs'), '连接 ' + fmtMs(r.connectMs)));
     if (r.ok) head.append(h('span', { class: 'stat' }, fmtSize(r.size || 0)));
     head.append(h('span', { class: 'stat' }, new Date(r.time).toLocaleTimeString()));
@@ -1495,7 +1590,7 @@ function renderResp() {
   if (!r) {
     body.append(h('div', { class: 'placeholder' }, h('div', null,
       h('div', { class: 'big' }, started != null ? '正在调用…' : '还没有发送过'),
-      started != null ? '首次调用需要连接注册中心，可能稍慢' : h('div', null, '按 ', h('span', { class: 'k' }, MOD + '↵'), ' 或点击“发送”'))));
+      started != null ? '首次调用需要连接注册中心，可能稍慢；按 Esc 或点击“中断”可停止' : h('div', null, '按 ', h('span', { class: 'k' }, MOD + '↵'), ' 或点击“发送”'))));
     if (S.respTab === 'vars') showVars(body, null);
     return;
   }
@@ -1674,8 +1769,8 @@ function viewPlan(d, n, c) {
       h('div', { class: 'section-title' }, '用户定义的变量'),
       varsTable(d, n),
       h('div', { class: 'section-title' }, '分组 (' + groups.length + ')'),
-      h('div', { class: 'list' }, groups.map(g => h('div', { class: 'item' + (g.enabled ? '' : ' off'), onclick: () => select(g.id) },
-        I('folder', 's'), h('div', { class: 'grow' }, g.name), h('span', { class: 'sub' }, samplersIn(g).length + ' 个请求' + (g.enabled ? '' : ' · 已停用'))))),
+      h('div', { class: 'list' }, groups.map(g => h('div', { class: 'item', onclick: () => select(g.id) },
+        I('folder', 's'), h('div', { class: 'grow' }, g.name), h('span', { class: 'sub' }, samplersIn(g).length + ' 个请求')))),
       h('button', { class: 'btn sm', style: { marginTop: '10px' }, onclick: () => addNode(d.root, 'group') }, I('plus', 'xs'), '新建分组'),
       h('div', { class: 'section-title' }, '备注'),
       h('textarea', { class: 'input ui', rows: 3, style: { maxWidth: '980px' }, oninput: e => queue(d, n, { props: { comments: e.target.value } }) }, n.props.comments || '')));
@@ -1689,14 +1784,15 @@ function viewGroup(d, n, c) {
     h('div', { class: 'form', style: { paddingTop: '4px' } },
       h('div', { class: 'section-title' }, '配置 (' + configs.length + ')',
         h('button', { class: 'btn ghost sm', onclick: e => { const r = e.currentTarget.getBoundingClientRect(); nodeMenuAdd(d, n, r.left, r.bottom + 4); } }, I('plus', 'xs'), '添加')),
-      configs.length ? h('div', { class: 'list' }, configs.map(x => h('div', { class: 'item' + (x.enabled ? '' : ' off'), onclick: () => select(x.id) },
+      configs.length ? h('div', { class: 'list' }, configs.map(x => h('div', { class: 'item' + (isOn(x) ? '' : ' off'), onclick: () => select(x.id) },
         badge(x.kind), h('div', { class: 'grow' }, x.name),
-        h('span', { class: 'sub' }, x.kind === 'defaults' ? (x.props.registryProtocol || '') + '://' + (x.props.registryAddress || '未填地址') : KIND_LABEL[x.kind]))))
+        h('span', { class: 'sub' }, x.kind === 'defaults' ? (x.props.registryProtocol || '') + '://' + (x.props.registryAddress || '未填地址') : KIND_LABEL[x.kind]),
+        CONFIG_KINDS.has(x.kind) ? miniSwitch(x) : null)))
         : h('div', { class: 'help' }, '没有配置元素。可以添加“Dubbo 默认配置”统一设置注册中心地址。'),
       h('div', { class: 'section-title' }, '请求 (' + reqs.length + ')',
         h('button', { class: 'btn ghost sm', onclick: () => addNode(n, 'dubbo') }, I('plus', 'xs'), '新建 Dubbo 请求'),
         h('button', { class: 'btn ghost sm', onclick: () => addNode(n, 'zms') }, I('plus', 'xs'), '新建 ZMS 消息')),
-      h('div', { class: 'list' }, reqs.map(x => h('div', { class: 'item' + (x.enabled ? '' : ' off'), onclick: () => select(x.id) },
+      h('div', { class: 'list' }, reqs.map(x => h('div', { class: 'item', onclick: () => select(x.id) },
         x.kind === 'sampler' ? badge('sampler', x) : h('span', { class: 'sdot ' + rowStatus(d, x) }), h('div', { class: 'grow' }, x.name),
         h('span', { class: 'sub', style: { fontFamily: 'var(--mono)' } }, x.kind === 'sampler' ? '不支持发送' : x.kind === 'zms' ? 'ZMS · ' + (x.props.topic || '') : (x.props.interface || '').replace(/^.*\./, '') + '#' + (x.props.method || ''))))),
       hidden.length ? h('div', { class: 'note', style: { marginTop: '18px' } },
@@ -1714,7 +1810,6 @@ function nodeMenuAdd(d, n, x, y) {
 const ZMS_MODES = [['syncSend', '同步发送（syncSend，返回 code）'], ['sendOneWay', '单向发送（sendOneWay，无响应）']];
 function viewZms(d, n, c) {
   const p = n.props;
-  const sending = S.sending.has(resKey(d, n));
   const topicInput = h('input', {
     class: 'iface', value: p.topic, placeholder: 'topic 名称', spellcheck: 'false',
     oninput: e => {
@@ -1723,9 +1818,7 @@ function viewZms(d, n, c) {
       if (m) m.textContent = e.target.value;
     },
   });
-  const sendBtn = h('button', { class: 'send', disabled: sending, onclick: () => send(d, n) },
-    sending ? h('span', { class: 'spinner', style: { borderColor: 'rgba(255,255,255,.3)', borderTopColor: '#fff' } }) : I('send', 's'), '发送', h('span', { class: 'kbd' }, MOD + '↵'));
-  els.sendBtn = sendBtn;
+  const sendBtn = els.sendBtn = sendButton(d, n);
   const toConn = () => { S.reqTab = 'conn'; renderContent(); };
   const zk = resolveVars(d, n, p.zmsZKAddr || '');
   const oneway = (p.messageSendMod || 'syncSend') === 'sendOneWay';
@@ -1792,7 +1885,12 @@ function viewOther(d, n, c) {
 
 document.addEventListener('keydown', e => {
   const mod = IS_MAC ? e.metaKey : e.ctrlKey;
-  if (e.key === 'Escape') closeMenu();
+  if (e.key === 'Escape') {
+    const hadMenu = !!menuEl;
+    closeMenu();
+    // Esc 中断当前请求（不抢搜索框的 Esc）
+    if (!hadMenu && !(e.target.closest && e.target.closest('.search')) && cancelCurrent()) e.preventDefault();
+  }
   if (!mod) return;
   const k = e.key.toLowerCase();
   if (k === 's') { e.preventDefault(); save(doc(), e.shiftKey); }
