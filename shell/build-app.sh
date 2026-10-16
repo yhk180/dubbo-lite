@@ -26,12 +26,13 @@ cp -R dist/dubbo-lite/dubbo-lite.jar dist/dubbo-lite/lib dist/dubbo-lite/lib-zms
 
 echo "  · 生成图标"
 ICON_OK=0
-if qlmanage -t -s 1024 -o build/shell shell/AppIcon.svg >/dev/null 2>&1 && [[ -f build/shell/AppIcon.svg.png ]]; then
+# 用 NSImage 渲染为透明背景（qlmanage 的缩略图带白底，图标四角会有白边）；每个尺寸单独渲染，小图更清晰
+if swiftc -O -o build/shell/svg2png shell/svg2png.swift -framework AppKit 2>build/shell/svg2png.log; then
   SET=build/shell/AppIcon.iconset
   mkdir -p "$SET"
   for s in 16 32 128 256 512; do
-    sips -z $s $s build/shell/AppIcon.svg.png --out "$SET/icon_${s}x${s}.png" >/dev/null
-    sips -z $((s * 2)) $((s * 2)) build/shell/AppIcon.svg.png --out "$SET/icon_${s}x${s}@2x.png" >/dev/null
+    build/shell/svg2png shell/AppIcon.svg "$SET/icon_${s}x${s}.png" $s shadow
+    build/shell/svg2png shell/AppIcon.svg "$SET/icon_${s}x${s}@2x.png" $((s * 2)) shadow
   done
   iconutil -c icns "$SET" -o "$APP/Contents/Resources/AppIcon.icns" && ICON_OK=1
 fi

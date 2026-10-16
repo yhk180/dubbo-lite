@@ -6,6 +6,8 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 import dubbolite.jmx.JmxDoc;
 import dubbolite.run.DubboClient;
+import dubbolite.run.ParamCheck;
+import dubbolite.run.RegistrySniffer;
 import dubbolite.run.Runner;
 
 import javax.swing.JFileChooser;
@@ -29,6 +31,7 @@ final class Api {
 
     private final Settings settings;
     private final DubboClient client = new DubboClient();
+    private final RegistrySniffer sniffer = new RegistrySniffer();
     private final Properties props = new Properties();
     private final Runner runner;
     private final Map<String, JmxDoc> docs = new ConcurrentHashMap<>();
@@ -89,6 +92,13 @@ final class Api {
                 JmxDoc d = doc(in);
                 return runner.send(d, in.get("nodeId").getAsInt(), session(d));
             }
+            case "sniffServices":
+                return sniffer.services(str(in, "protocol"), str(in, "address"), str(in, "group"), bool(in, "refresh"));
+            case "sniffProviders":
+                return sniffer.providers(str(in, "protocol"), str(in, "address"), str(in, "group"), str(in, "iface"), bool(in, "refresh"));
+            case "checkParams": {
+                return ParamCheck.check(str(in, "text"), bool(in, "dandelion"));
+            }
             case "cancel": {
                 JsonObject o = new JsonObject();
                 o.addProperty("cancelled", runner.cancel(doc(in), in.get("nodeId").getAsInt()));
@@ -106,6 +116,7 @@ final class Api {
             case "reset": {
                 JsonObject o = new JsonObject();
                 o.addProperty("count", client.reset());
+                sniffer.reset();
                 return o;
             }
             case "settings": {
@@ -117,6 +128,9 @@ final class Api {
                         }
                     }
                     settings.setExtPaths(l);
+                }
+                if (in.has("theme")) {
+                    settings.setTheme(str(in, "theme"));
                 }
                 return state();
             }
@@ -141,6 +155,7 @@ final class Api {
         JsonObject o = new JsonObject();
         o.add("recent", Json.GSON.toJsonTree(settings.recent()));
         o.add("extPaths", Json.GSON.toJsonTree(settings.extPaths()));
+        o.addProperty("theme", settings.theme());
         o.addProperty("home", Settings.HOME.toString());
         o.addProperty("version", Main.VERSION);
         o.addProperty("java", System.getProperty("java.version"));
@@ -157,6 +172,11 @@ final class Api {
         return o;
     }
 
+    private void forgetRecent(Path path, Path abs) {
+        settings.removeRecent(path.toString());
+        settings.removeRecent(abs.toString());
+    }
+
     private JsonObject open(Path path) throws Exception {
         Path abs = path.toAbsolutePath().normalize();
         for (JmxDoc d : docs.values()) {
@@ -165,11 +185,22 @@ final class Api {
                 return d.toJson();
             }
         }
+        // 不存在或无法读取的文件同时从“最近打开”中移除
         if (!Files.isRegularFile(abs)) {
-            settings.removeRecent(abs.toString());
-            throw new IllegalArgumentException("文件不存在: " + abs);
+            forgetRecent(path, abs);
+            throw new IllegalArgumentException("文件不存在，已从最近打开中移除：" + abs);
         }
-        JmxDoc d = JmxDoc.load(abs);
+        JmxDoc d;
+        try {
+            if (!Files.isReadable(abs)) {
+                throw new java.nio.file.AccessDeniedException(abs.toString());
+            }
+            d = JmxDoc.load(abs);
+        } catch (java.io.IOException e) {
+            forgetRecent(path, abs);
+            throw new IllegalArgumentException("无法读取文件，已从最近打开中移除：" + abs
+                    + (e instanceof java.nio.file.AccessDeniedException ? "（没有读取权限）" : "（" + e.getMessage() + "）"));
+        }
         settings.touchRecent(abs);
         return register(d, null);
     }
@@ -226,6 +257,11 @@ final class Api {
 
     private Runner.Session session(JmxDoc d) {
         return sessions.computeIfAbsent(d.id, k -> new Runner.Session());
+    }
+
+    private static boolean bool(JsonObject in, String k) {
+        JsonElement e = in.get(k);
+        return e != null && !e.isJsonNull() && e.getAsBoolean();
     }
 
     private static String str(JsonObject in, String k) {

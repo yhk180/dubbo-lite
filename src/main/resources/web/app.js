@@ -77,6 +77,7 @@ const ICONS = {
   power: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>',
   up: '<path d="m18 15-6-6-6 6"/>',
   down: '<path d="m6 9 6 6 6-6"/>',
+  check: '<path d="m5 12.5 4.5 4.5L19 7"/>',
   eraser: '<path d="m7 21-4.3-4.3a1 1 0 0 1 0-1.4l10-10a1 1 0 0 1 1.4 0l5.6 5.6a1 1 0 0 1 0 1.4L13 21"/><path d="M22 21H7M5 11l9 9"/>',
 };
 function I(name, cls = '') {
@@ -375,6 +376,59 @@ function parseLoose(text) {
   if (i < s.length) fail('多余的内容');
   return v;
 }
+const FULL_WIDTH = { '“': '"', '”': '"', '‘': "'", '’': "'", '，': ',', '：': ':', '［': '[', '］': ']', '｛': '{', '｝': '}' };
+/** 字符串之外的全角标点（解析器可能不报错，但多半是输入法误输入） */
+function lintFullWidth(text) {
+  let inStr = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (c === '\\') i++;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (FULL_WIDTH[c]) return { pos: i, msg: '全角字符 ' + c + ' 可能是误输入，应为半角 ' + FULL_WIDTH[c] };
+  }
+  return null;
+}
+/** 在 [start, end) 范围内按 JSON 定位第一个错误；缺逗号时位置退回到上一个值的末尾 */
+function locateJson(text, start, end) {
+  try {
+    parseLoose(text.slice(start, end));
+    return null;
+  } catch (e) {
+    let pos = start + (e.pos || 0);
+    const msg = e.message.replace(/ \(位置 \d+\)$/, '');
+    if (/^需要 , 或/.test(msg)) while (pos > start && /\s/.test(text[pos - 1])) pos--;
+    return { pos, msg: msg.replace(/^需要 , 或 (.)$/, '这里缺少 , 或 $1（上一个值之后需要逗号）') };
+  }
+}
+/** 参数编辑器的即时校验：后台用发送时相同的解析器检查语法；没有语法错误时再提示全角标点 */
+function paramsChecker(editor, dandelion) {
+  let seq = 0, timer = 0;
+  return delay => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const text = editor.ed.get();
+      const my = ++seq;
+      let r;
+      try {
+        r = await api('checkParams', { text, dandelion });
+      } catch (e) {
+        return;
+      }
+      if (my !== seq || editor.ed.get() !== text) return;
+      if (r.valueStart != null) {
+        const loc = locateJson(text, r.valueStart, r.valueEnd);
+        if (loc) Object.assign(r, { pos: loc.pos, error: r.error.replace(/：.*$/, '：') + loc.msg });
+      }
+      const w = lintFullWidth(text);
+      if (!r.error) editor.ed.diag(w && Object.assign({ level: 'warn' }, w));
+      // 出错位置之前有全角标点时，多半就是它导致的
+      else if (w && r.pos != null && w.pos <= r.pos) editor.ed.diag({ level: 'err', msg: w.msg, pos: w.pos });
+      else editor.ed.diag({ level: 'err', msg: r.error, pos: r.pos });
+    }, delay == null ? 400 : delay);
+  };
+}
 function stringifyLoose(n, ind = '') {
   const nx = ind + '  ';
   switch (n.t) {
@@ -483,20 +537,54 @@ function editorKeys(e, ta) {
     } else insertText(ta, '\n' + ind + extra);
   }
 }
+/** 点分名称（如 com.zto.voice.dto.DistributeCmd）：双击只选中其中一段，三击选中整个名称；不含 . 的内容保持默认行为 */
+function dottedSelect(el) {
+  const W = /[\w$]/, N = /[\w$.]/;
+  let caret = -1;
+  el.addEventListener('click', e => {
+    if (e.detail === 1) { caret = el.selectionStart; return; }
+    if (e.detail > 3 || caret < 0) return;
+    const v = el.value;
+    const i = W.test(v[caret] || '') ? caret : W.test(v[caret - 1] || '') ? caret - 1 : -1;
+    if (i < 0) return;
+    let a = i, b = i + 1;
+    while (a > 0 && N.test(v[a - 1])) a--;
+    while (b < v.length && N.test(v[b])) b++;
+    while (v[a] === '.') a++;
+    while (b > a && v[b - 1] === '.') b--;
+    if (!v.slice(a, b).includes('.')) return;
+    if (e.detail === 3) return el.setSelectionRange(a, b);
+    let x = i, y = i + 1;
+    while (x > 0 && W.test(v[x - 1])) x--;
+    while (y < v.length && W.test(v[y])) y++;
+    el.setSelectionRange(x, y);
+  });
+}
+const measureCtx = document.createElement('canvas').getContext('2d');
 function codeEditor({ value = '', lang = 'json', onChange, readOnly, hint, tools }) {
   const gutter = h('div', { class: 'gutter' });
   const pre = h('pre');
   const ta = h('textarea', { spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off', autocorrect: 'off', wrap: 'off' });
   ta.value = value;
   if (readOnly) ta.readOnly = true;
+  dottedSelect(ta);
   const hintEl = hint ? h('div', { class: 'empty-hint' }, hint) : null;
-  const root = h('div', { class: 'code' }, gutter, h('div', { class: 'body' }, pre, ta), hintEl, tools ? h('div', { class: 'float' }, tools) : null);
+  const stripe = h('div', { class: 'diag-line' });
+  const root = h('div', { class: 'code' }, gutter, h('div', { class: 'body' }, stripe, pre, ta), hintEl, tools ? h('div', { class: 'float' }, tools) : null);
+  /** 当前的错误/警告：{ level: 'err' | 'warn', pos?, line? }（只做视觉提示：出错行底色 + 行号标红；没有位置时行号栏边缘标红） */
+  let diag = null;
+  function placeDiag() {
+    stripe.style.display = diag && diag.line ? '' : 'none';
+    if (diag && diag.line) stripe.style.top = 10 + (diag.line - 1) * 20 - ta.scrollTop + 'px';
+    [...gutter.children].forEach((el, i) => el.classList.toggle('mark', !!diag && diag.line === i + 1));
+  }
   let lines = -1;
   const hl = lang === 'java' ? hlJava : lang === 'text' ? esc : hlJson;
   function sync() {
     pre.scrollTop = ta.scrollTop;
     pre.scrollLeft = ta.scrollLeft;
     gutter.scrollTop = ta.scrollTop;
+    placeDiag();
   }
   function paint() {
     const v = ta.value;
@@ -517,11 +605,34 @@ function codeEditor({ value = '', lang = 'json', onChange, readOnly, hint, tools
     paint();
     if (onChange) onChange(ta.value);
   });
-  ta.addEventListener('keydown', e => editorKeys(e, ta));
+  /** 补全弹窗等先处理按键，返回 true 表示已处理 */
+  const keyHooks = [];
+  ta.addEventListener('keydown', e => { if (!keyHooks.some(f => f(e))) editorKeys(e, ta); });
   paint();
   root.ed = {
     get: () => ta.value,
     set: v => { ta.value = v; paint(); },
+    /** 显示（或清除）一条错误/警告：pos 为字符位置，对应行高亮 */
+    diag: dg => {
+      diag = dg || null;
+      if (diag && diag.pos != null) diag.line = ta.value.slice(0, diag.pos).split('\n').length;
+      root.classList.toggle('warn', !!diag && diag.level === 'warn');
+      root.classList.toggle('diag-nopos', !!diag && !diag.line);
+      placeDiag();
+    },
+    /** 字符位置在编辑器内的坐标（行底部），用于定位补全弹窗 */
+    caretXY: pos => {
+      const v = ta.value;
+      const ls = v.lastIndexOf('\n', pos - 1) + 1;
+      const line = v.slice(0, ls).split('\n').length - 1;
+      measureCtx.font = getComputedStyle(ta).font;
+      return {
+        x: gutter.offsetWidth + 6 + measureCtx.measureText(v.slice(ls, pos)).width - ta.scrollLeft,
+        y: 10 + (line + 1) * 20 - ta.scrollTop,
+      };
+    },
+    onKey: f => keyHooks.push(f),
+    root,
     replaceAll: v => { ta.focus(); ta.select(); insertText(ta, v); },
     focus: () => ta.focus(),
     ta,
@@ -601,7 +712,9 @@ function showMenu(x, y, items) {
     else {
       m.append(h('div', {
         class: 'mi' + (it.danger ? ' danger' : ''),
+        title: it.title || null,
         onclick: () => { closeMenu(); it.run(); },
+        oncontextmenu: it.context ? e => { e.preventDefault(); it.context(e); } : null,
       }, it.icon ? I(it.icon, 's') : h('span', { style: { width: '14px' } }), it.text, it.key ? h('span', { class: 'k' }, it.key) : null));
     }
   }
@@ -988,7 +1101,7 @@ function renderTop() {
     h('div', { class: 'brand' }, h('img', { src: 'icon.svg', alt: '' }), h('span', null, 'Dubbo Lite')),
     els.tabs,
     h('div', { class: 'actions' },
-      h('button', { class: 'btn ghost', title: '打开 (' + MOD + 'O)', onclick: openDialog }, I('open', 's'), '打开'),
+      h('button', { class: 'btn ghost', title: '打开最近的文件，或从文件夹打开 (' + MOD + 'O)', onclick: e => openMenu(e.currentTarget) }, I('open', 's'), '打开', I('down', 'xs')),
       h('button', { class: 'btn ghost', title: '新建测试计划', onclick: newDoc }, I('plus', 's'), '新建'),
       els.saveBtn = h('button', { class: 'btn', title: '保存 (' + MOD + 'S)', onclick: () => save(doc()) }, I('save', 's'), '保存'),
       h('button', { class: 'btn ghost icon', title: '更多', onclick: e => moreMenu(e.currentTarget) }, I('more'))));
@@ -1028,8 +1141,56 @@ function moreMenu(btn) {
     { text: '重置 Dubbo 连接', icon: 'refresh', run: resetConnections },
     d && { text: '清空会话变量', icon: 'eraser', run: clearVars },
     '-',
+    { label: '主题' },
+    ...THEMES.map(([v, text]) => ({ text, icon: (S.state.theme || 'system') === v ? 'check' : null, run: () => setTheme(v) })),
+    '-',
     { text: '设置…', icon: 'gear', run: showSettings },
   ]);
+}
+/** “打开”菜单：最近打开的文件 + 从文件夹打开 */
+function openMenu(btn) {
+  const r = btn.getBoundingClientRect();
+  const recent = (S.state.recent || []).slice(0, 10);
+  const home = (S.state.home || '').replace(/[\\/]\.dubbo-lite$/, '');
+  const where = p => {
+    let dir = dirOf(p);
+    if (home && dir.startsWith(home)) dir = '~' + dir.slice(home.length);
+    return dir.length > 32 ? '…' + dir.slice(-31) : dir;
+  };
+  showMenu(r.left, r.bottom + 6, [
+    recent.length && { label: '最近打开' },
+    ...recent.map(p => ({ text: baseName(p), icon: 'file', key: where(p), title: p + '\n右键可从列表移除', run: () => openPath(p), context: e => recentMenu(e, p) })),
+    recent.length && '-',
+    { text: '从文件夹打开…', icon: 'folder', key: MOD + 'O', run: openDialog },
+  ]);
+}
+/** 最近打开的右键菜单 */
+function recentMenu(e, p) {
+  showMenu(e.clientX, e.clientY, [{ text: '从最近打开中移除', icon: 'x', run: () => forgetRecent(p) }]);
+}
+async function forgetRecent(p) {
+  try {
+    S.state = await api('removeRecent', { path: p });
+  } catch (e) {
+    return toast(e.message, true);
+  }
+  if (!doc()) render();
+}
+const THEMES = [['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']];
+/** 界面主题：system 跟随系统，light / dark 固定；macOS 外壳同步标题栏外观 */
+function applyTheme(t) {
+  const theme = t === 'light' || t === 'dark' ? t : 'system';
+  if (theme === 'system') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', theme);
+  if (MAC_BRIDGE) nativeCall({ type: 'theme', theme });
+}
+async function setTheme(t) {
+  applyTheme(t);
+  try {
+    S.state = await api('settings', { theme: t });
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 function welcome() {
   const recent = S.state.recent || [];
@@ -1043,12 +1204,12 @@ function welcome() {
         h('button', { class: 'btn', onclick: newDoc }, I('plus', 's'), '新建测试计划')),
       recent.length ? h('div', { class: 'recent' },
         h('h3', null, '最近打开'),
-        recent.map(p => h('div', { class: 'rec', onclick: () => openPath(p) },
+        recent.map(p => h('div', { class: 'rec', title: p, onclick: () => openPath(p), oncontextmenu: e => { e.preventDefault(); recentMenu(e, p); } },
           h('span', { class: 'ic' }, I('file')),
           h('div', { class: 'grow' }, h('div', { class: 'n' }, baseName(p)), h('div', { class: 'p' }, '‎' + dirOf(p))),
           h('button', {
             class: 'btn ghost sm icon x', title: '从列表移除',
-            onclick: async e => { e.stopPropagation(); S.state = await api('removeRecent', { path: p }); render(); },
+            onclick: e => { e.stopPropagation(); forgetRecent(p); },
           }, I('x', 'xs'))))) : null,
       h('div', { class: 'drop-hint' }, '也可以把 .jmx 文件直接拖进窗口')));
 }
@@ -1383,13 +1544,15 @@ function subtabs(tabs, cur, onPick, right) {
 function viewRequest(d, n, c) {
   const { f, from } = effective(d, n);
   const ifaceInput = h('input', { class: 'iface', value: n.props.interface, placeholder: 'com.example.api.FooService', spellcheck: 'false', oninput: e => { queue(d, n, { props: { interface: e.target.value } }); } });
+  dottedSelect(ifaceInput);
+  const setMethod = v => {
+    queue(d, n, { props: { method: v } });
+    const m = els.tree.querySelector(`.row[data-id="${n.id}"] .meta`);
+    if (m) m.textContent = v;
+  };
   const methodInput = h('input', {
     class: 'method', value: n.props.method, placeholder: 'method', spellcheck: 'false',
-    oninput: e => {
-      queue(d, n, { props: { method: e.target.value } });
-      const m = els.tree.querySelector(`.row[data-id="${n.id}"] .meta`);
-      if (m) m.textContent = e.target.value;
-    },
+    oninput: e => setMethod(e.target.value),
   });
   const sendBtn = els.sendBtn = sendButton(d, n);
 
@@ -1421,7 +1584,8 @@ function viewRequest(d, n, c) {
   const head = h('div', { class: 'req' },
     titleLine(d, n),
     crumb(d, n),
-    h('div', { class: 'endpoint' }, ifaceInput, h('div', { class: 'sep' }), h('span', { class: 'hash' }, '#'), methodInput, sendBtn),
+    h('div', { class: 'endpoint' }, ifaceInput, endpointSplit(methodInput), h('span', { class: 'hash' }, '#'), methodInput, sendBtn,
+      ifaceComplete(d, n, ifaceInput, methodInput), methodComplete(d, n, methodInput, setMethod)),
     h('div', { class: 'chips' }, chips));
 
   const tab = S.reqTab;
@@ -1431,7 +1595,11 @@ function viewRequest(d, n, c) {
   const body = h('div', { class: 'req-body' });
   let editor = null;
   if (tab === 'params') {
-    editor = codeEditor({ value: n.props.params || '', lang: 'json', hint: PARAM_HINT, onChange: v => queue(d, n, { props: { params: v } }) });
+    let check = null;
+    editor = codeEditor({ value: n.props.params || '', lang: 'json', hint: PARAM_HINT, onChange: v => { queue(d, n, { props: { params: v } }); check(); } });
+    check = paramsChecker(editor, n.flavor === 'dandelion');
+    check(0);
+    paramsComplete(d, n, editor);
     body.append(editor);
   } else if (tab === 'conn') {
     body.append(connForm(d, n, from));
@@ -1448,6 +1616,546 @@ function viewRequest(d, n, c) {
   }
   c.append(head, tabs, body, hResizer(), els.resp = h('div', { class: 'resp', style: { height: (localStorage.getItem('dl.respH') || 46) + '%' } }));
   renderResp();
+}
+/** 已打开文件中出现过的接口名：当前文件在前，其次是其他已打开的文件 */
+function knownInterfaces(d, self) {
+  const m = new Map();
+  const add = (doc, here) => doc.byId.forEach(x => {
+    if (x === self || x.kind !== 'dubbo') return;
+    const name = (x.props.interface || '').trim();
+    if (!name) return;
+    let e = m.get(name);
+    if (!e) m.set(name, e = { name, count: 0, here: false });
+    e.count++;
+    if (here) e.here = true;
+  });
+  add(d, true);
+  S.docs.forEach(o => { if (o !== d) add(o, false); });
+  return [...m.values()];
+}
+/** 匹配优先级：类名前缀 > 类名包含 > 包段前缀 > 全名包含 > 类名驼峰首字母；at/len 为全名中的高亮位置 */
+function matchIface(name, q) {
+  if (!q) return { rank: 0 };
+  const base = name.lastIndexOf('.') + 1;
+  const simple = name.slice(base).toLowerCase();
+  const full = name.toLowerCase();
+  let i = simple.indexOf(q);
+  if (i >= 0) return { rank: i === 0 ? 0 : 1, at: base + i, len: q.length };
+  i = full.indexOf(q);
+  if (i >= 0) return { rank: i === 0 || full[i - 1] === '.' ? 2 : 3, at: i, len: q.length };
+  if (q.length > 1 && name.slice(base).replace(/[^A-Z]/g, '').toLowerCase().startsWith(q)) return { rank: 4 };
+  return null;
+}
+/** 输入是全类名的前缀时，按下一级包名归并（如 com.zto.me → com.zto.message.），逐级补全 */
+function nextPackages(all, q) {
+  const m = new Map();
+  all.forEach(it => {
+    if (!it.name.toLowerCase().startsWith(q)) return;
+    const dot = it.name.indexOf('.', q.length);
+    if (dot < 0) return;
+    const name = it.name.slice(0, dot + 1);
+    let e = m.get(name);
+    if (!e) m.set(name, e = { name, pkg: true, classes: 0, count: 0, here: false, at: 0, len: q.length });
+    e.classes++;
+    e.count += it.count;
+    if (it.here) e.here = true;
+  });
+  return [...m.values()].sort((a, b) => b.here - a.here || b.count - a.count || a.name.localeCompare(b.name));
+}
+/* ---- 注册中心嗅探（只读 zookeeper 上的服务与提供者 URL；前后端各缓存一段时间） */
+
+/** 请求实际使用的注册中心；不能嗅探时返回 { error } */
+function registryOf(d, n) {
+  const { f } = effective(d, n);
+  const address = resolveVars(d, n, (f.registryAddress || '').trim());
+  if (n.flavor === 'dandelion') {
+    if (!address) return { error: '未填写 URL' };
+    if (!address.includes('zookeeper')) return { error: '直连地址，没有注册中心可嗅探' };
+    return { protocol: 'zookeeper', address, group: '' };
+  }
+  const protocol = (f.registryProtocol || 'zookeeper').trim().toLowerCase();
+  if (protocol === 'none') return { error: '直连地址，没有注册中心可嗅探' };
+  if (protocol !== 'zookeeper') return { error: '只支持嗅探 zookeeper 注册中心' };
+  if (!address) return { error: '未配置注册中心地址' };
+  if (address.includes('${')) return { error: '注册中心地址中有未定义的变量' };
+  return { protocol, address, group: resolveVars(d, n, (f.registryGroup || '').trim()) };
+}
+const SNIFF = new Map();
+/** 读取嗅探结果：同一 key 同时只请求一次，成功结果缓存 ttl，失败 30 秒内不重试；返回 { loading, data, error, promise } */
+function sniff(action, body, ttl, refresh) {
+  const key = action + JSON.stringify(body);
+  let e = SNIFF.get(key);
+  if (e && !refresh && (e.loading || Date.now() - e.at < (e.error ? 30000 : ttl))) return e;
+  e = { loading: true, at: Date.now() };
+  SNIFF.set(key, e);
+  e.promise = api(action, Object.assign({ refresh: !!refresh }, body)).then(
+    data => Object.assign(e, { loading: false, data, at: Date.now() }),
+    err => Object.assign(e, { loading: false, error: err.message, at: Date.now() }));
+  return e;
+}
+const sniffServices = (reg, refresh) => sniff('sniffServices', { protocol: reg.protocol, address: reg.address, group: reg.group }, 120000, refresh);
+const sniffProviders = (reg, iface, refresh) => sniff('sniffProviders', { protocol: reg.protocol, address: reg.address, group: reg.group, iface }, 30000, refresh);
+
+/**
+ * 候选列表弹窗（输入框下拉与编辑器内补全共用）：show(items, head, foot, active) 显示，
+ * key(e) 处理 ↑↓ 选择、↵/Tab 确认、Esc 关闭，已处理时返回 true
+ */
+function acList({ row, pick }) {
+  const box = h('div', { class: 'ac', style: { display: 'none' } });
+  const st = { items: [], active: 0, shown: false };
+  const hide = () => { box.style.display = 'none'; st.items = []; st.shown = false; };
+  const mark = () => {
+    box.querySelectorAll('.ac-i').forEach((x, i) => x.classList.toggle('on', i === st.active));
+    const on = box.querySelector('.ac-i.on');
+    if (on) on.scrollIntoView({ block: 'nearest' });
+  };
+  const show = (items, head, foot, active) => {
+    st.items = items;
+    st.active = Math.min(Math.max(0, active || 0), Math.max(0, items.length - 1));
+    st.shown = true;
+    box.style.display = '';
+    box.innerHTML = '';
+    if (head) box.append(head);
+    items.forEach((it, i) => {
+      const r = row(it);
+      const el = h('div', { class: 'ac-i' + (r.cls ? ' ' + r.cls : ''), title: r.title || '' }, r.kids);
+      el.addEventListener('mousedown', e => { e.preventDefault(); pick(it); });
+      el.addEventListener('mousemove', () => { if (st.active !== i) { st.active = i; mark(); } });
+      box.append(el);
+    });
+    if (foot) box.append(foot);
+    mark();
+  };
+  const key = e => {
+    if (!st.shown) return false;
+    if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && st.items.length) {
+      e.preventDefault();
+      st.active = (st.active + (e.key === 'ArrowDown' ? 1 : st.items.length - 1)) % st.items.length;
+      mark();
+      return true;
+    }
+    if (st.items.length && (e.key === 'Enter' || e.key === 'Tab') && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+      e.preventDefault();
+      pick(st.items[st.active]);
+      return true;
+    }
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      hide();
+      return true;
+    }
+    return false;
+  };
+  return { box, st, show, hide, key };
+}
+/**
+ * 输入框的下拉候选。compute(q, typed) 返回 { items, head, foot }（返回空则不显示）；
+ * typed 表示聚焦后是否输入过。refresh() 在异步数据到达后重算
+ */
+function dropdown(input, { compute, row, pick, openOnFocus, initial, minWidth = 360 }) {
+  const list = acList({ row, pick });
+  const { box, st } = list;
+  // want：用户期望下拉打开（异步数据到达前 compute 可能返回空，到达后由 refresh 再打开）
+  let typed = false, want = false;
+  const open = keep => {
+    want = true;
+    const r = compute(input.value.trim(), typed);
+    if (!r || (!(r.items || []).length && !r.head && !r.foot)) return list.hide();
+    const items = r.items || [];
+    const active = keep && st.shown && st.items.length ? st.active : initial ? initial(items) : 0;
+    const wrap = input.parentElement.clientWidth;
+    const width = Math.min(wrap, Math.max(minWidth, input.offsetWidth));
+    Object.assign(box.style, { left: Math.max(0, Math.min(input.offsetLeft, wrap - width)) + 'px', width: width + 'px' });
+    list.show(items, r.head, r.foot, active);
+  };
+  input.addEventListener('input', () => { typed = true; open(); });
+  input.addEventListener('focus', () => { typed = false; if (openOnFocus()) open(); });
+  const close = () => { want = false; list.hide(); };
+  input.addEventListener('blur', close);
+  input.addEventListener('keydown', e => {
+    if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !st.shown) {
+      e.preventDefault();
+      open();
+    } else {
+      if (e.key === 'Escape') want = false;
+      list.key(e);
+    }
+  });
+  return { box, open, close, refresh: () => { if (want && document.activeElement === input) open(true); } };
+}
+/** 下拉框顶部/底部的说明行；action 为 [文字, 回调] 时右侧带一个按钮（如“刷新”） */
+function acNote(text, cls, action) {
+  const el = h('div', { class: 'ac-note' + (cls ? ' ' + cls : '') }, h('span', null, text));
+  if (action) {
+    const b = h('span', { class: 'ac-act' }, action[0]);
+    b.addEventListener('mousedown', e => { e.preventDefault(); action[1](); });
+    el.append(b);
+  }
+  return el;
+}
+/** 嗅探请求返回后刷新下拉框（每个请求只挂一次） */
+function whenLoaded(st, dd, hooked) {
+  if (st.loading && !hooked.has(st.promise)) {
+    hooked.add(st.promise);
+    st.promise.then(() => dd.refresh());
+  }
+}
+/** 接口名候选：下一级包名在前，其后是已打开文件中用过的接口，再后是注册中心上的其他接口 */
+function ifaceComplete(d, n, input, next) {
+  const hooked = new Set();
+  let refresh = false;
+  const dd = dropdown(input, {
+    minWidth: 520,
+    openOnFocus: () => !input.value.trim(),
+    compute: q0 => {
+      const q = q0.toLowerCase();
+      const known = knownInterfaces(d, n);
+      const reg = registryOf(d, n);
+      const st = reg.error ? null : sniffServices(reg, refresh);
+      refresh = false;
+      if (st) whenLoaded(st, dd, hooked);
+      const matched = [];
+      known.forEach(it => { const m = matchIface(it.name, q); if (m) matched.push(Object.assign(it, m)); });
+      if (st && st.data) {
+        const seen = new Set(known.map(x => x.name));
+        for (const name of st.data.services) {
+          if (seen.has(name)) continue;
+          const m = matchIface(name, q);
+          if (m) matched.push(Object.assign({ name, count: 0, here: false, reg: true }, m));
+        }
+      }
+      const exact = matched.filter(it => it.name.toLowerCase() !== q);
+      const items = nextPackages(exact, q).concat(exact
+        .sort((a, b) => a.rank - b.rank || b.here - a.here || b.count - a.count || (a.reg ? 1 : 0) - (b.reg ? 1 : 0) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)))
+        .slice(0, 50);
+      const foot = st && st.error ? acNote('注册中心：' + st.error, 'warn', ['重试', () => { refresh = true; dd.open(true); }]) : null;
+      return { items, foot };
+    },
+    row: it => ({
+      cls: it.pkg ? 'pkg' : '',
+      title: it.name,
+      kids: (() => {
+        const base = it.name.lastIndexOf('.', it.pkg ? it.name.length - 2 : it.name.length) + 1;
+        return [it.pkg ? I('folder', 'xs') : null,
+          h('span', { class: 'ac-n' },
+            h('span', { class: 'pkg' }, acMark(it.name.slice(0, base), 0, it.at, it.len)),
+            h('b', null, acMark(it.name.slice(base), base, it.at, it.len))),
+          h('span', { class: 'ac-c' }, it.pkg ? it.classes + ' 个接口' : it.here ? it.count + ' 处' : it.reg ? '注册中心' : '其他文件')];
+      })(),
+    }),
+    pick: it => {
+      input.value = it.name;
+      queue(d, n, { props: { interface: it.name } });
+      if (it.pkg) return dd.open();
+      dd.close();
+      next.focus();
+      next.select();
+    },
+  });
+  return dd.box;
+}
+/** 方法名下拉：列出注册中心上该接口提供者的方法；版本/分组为空且提供者一致时，选择方法后顺带填上 */
+function methodComplete(d, n, input, onPick) {
+  const hooked = new Set();
+  let refresh = false;
+  let ctx = null;
+  const dd = dropdown(input, {
+    minWidth: 420,
+    openOnFocus: () => true,
+    initial: items => items.findIndex(it => it.name === input.value),
+    compute: (q0, typed) => {
+      ctx = null;
+      const iface = resolveVars(d, n, (n.props.interface || '').trim());
+      const reg = registryOf(d, n);
+      if (!iface || reg.error) return null;
+      const st = sniffProviders(reg, iface, refresh);
+      refresh = false;
+      whenLoaded(st, dd, hooked);
+      const again = () => { refresh = true; dd.open(true); };
+      if (st.loading) return null;
+      if (st.error) return { head: acNote('注册中心：' + st.error, 'warn', ['重试', again]) };
+      const all = st.data.providers;
+      if (!all.length) return { head: acNote('注册中心上没有该接口的提供者', 'warn', ['刷新', again]) };
+      const { f } = effective(d, n);
+      const ver = resolveVars(d, n, (f.version || '').trim());
+      const grp = resolveVars(d, n, (f.group || '').trim());
+      const match = all.filter(p => p.version === ver && p.group === grp);
+      const use = match.length ? match : all;
+      ctx = { all, match, ver, grp };
+      const uniq = a => [...new Set(a)];
+      const vg = p => '版本 ' + (p.version || '（空）') + (p.group ? ' · 分组 ' + p.group : '');
+      const head = match.length ? null : acNote('没有' + vg({ version: ver, group: grp }) + ' 的提供者，下面是全部提供者的方法', 'warn');
+      const q = typed ? q0.toLowerCase() : '';
+      const methods = uniq(use.flatMap(p => p.methods)).sort();
+      const items = methods.filter(m => m.toLowerCase().includes(q))
+        .sort((a, b) => (b.toLowerCase().startsWith(q) ? 1 : 0) - (a.toLowerCase().startsWith(q) ? 1 : 0))
+        .map(name => ({ name, at: q ? name.toLowerCase().indexOf(q) : null, len: q.length }));
+      return { head, items };
+    },
+    row: it => ({
+      cls: it.name === input.value ? 'cur' : '',
+      kids: [h('span', { class: 'ac-n' }, h('b', null, acMark(it.name, 0, it.at, it.len))),
+        it.name === input.value ? h('span', { class: 'ac-c' }, '当前') : null],
+    }),
+    pick: it => {
+      input.value = it.name;
+      dd.close();
+      onPick(it.name);
+      const fill = {};
+      if (ctx && !ctx.match.length) {
+        const vs = [...new Set(ctx.all.map(p => p.version))], gs = [...new Set(ctx.all.map(p => p.group))];
+        if (!ctx.ver && vs.length === 1 && vs[0]) fill.version = vs[0];
+        if (!ctx.grp && gs.length === 1 && gs[0]) fill.group = gs[0];
+      }
+      if (Object.keys(fill).length) {
+        queue(d, n, { props: fill });
+        toast('已按注册中心的提供者填写' + (fill.version ? '版本 ' + fill.version : '') + (fill.group ? ' 分组 ' + fill.group : ''));
+        renderContent();
+      }
+    },
+  });
+  return dd.box;
+}
+/* ---- 参数编辑器内补全：参数类名 + 属性名（来源于已打开文件中出现过的参数） */
+
+/**
+ * 宽松扫描参数文本 [{类型: 值}, ...]：容忍 YAML 标签、${变量}、未加引号的键和语法错误。
+ * 容器链 stack 每层 { ch: '{' | '[', seg: 在父容器中的键（数组元素为 '[]'）, keys: 已出现的键 }。
+ * onKey(stack, key, kind) 在每读完一个键时回调，kind 为值的首字符；
+ * 给定 stop 时扫描到该位置，返回 { stack, mode, start }：mode 为 'quoted' / 'bare' 表示光标正在输入一个键，start 为键的起始位置
+ */
+function scanParams(s, stop, onKey) {
+  const end = stop == null ? s.length : stop;
+  const stack = [];
+  const top = () => stack[stack.length - 1];
+  const keyPos = () => { const t = top(); return !!t && t.ch === '{' && t.expectKey; };
+  const keyDone = (key, j) => {
+    const t = top();
+    t.pending = key;
+    t.expectKey = false;
+    t.keys.push(key);
+    if (onKey) { const m = /^\s*:\s*(\S)/.exec(s.slice(j, j + 100)); onKey(stack, key, m ? m[1] : ''); }
+  };
+  let i = 0;
+  while (i < end) {
+    const c = s[i];
+    if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < s.length && s[j] !== c && s[j] !== '\n') j += s[j] === '\\' ? 2 : 1;
+      if (j >= end) return { stack, mode: keyPos() ? 'quoted' : '', start: i };
+      if (keyPos()) keyDone(s.slice(i + 1, j), j + 1);
+      i = j + 1;
+    } else if (c === '{' || c === '[') {
+      const p = top();
+      stack.push({ ch: c, seg: p ? (p.ch === '[' ? '[]' : p.pending) : null, keys: [], expectKey: c === '{', pending: null });
+      i++;
+    } else if (c === '}' || c === ']') {
+      stack.pop();
+      i++;
+    } else if (c === ',') {
+      const t = top();
+      if (t && t.ch === '{') { t.expectKey = true; t.pending = null; }
+      i++;
+    } else if (c === ':' || c === ' ' || c === '\t' || c === '\n' || c === '\r') {
+      i++;
+    } else if (c === '$' && s[i + 1] === '{') {
+      let depth = 0, j = i + 1;
+      for (; j < s.length && s[j] !== '\n'; j++) {
+        if (s[j] === '{') depth++;
+        else if (s[j] === '}' && --depth === 0) break;
+      }
+      if (j >= end) return { stack, mode: '', start: i };
+      i = j + 1;
+    } else if (c === '#' && (i === 0 || /\s/.test(s[i - 1]))) {
+      const j = s.indexOf('\n', i);
+      i = j < 0 ? s.length : j;
+    } else {
+      let j = i;
+      while (j < s.length && !/[\s,:{}[\]"]/.test(s[j])) j++;
+      if (j >= end) return { stack, mode: keyPos() ? 'bare' : '', start: i };
+      if (keyPos()) keyDone(s.slice(i, j), j);
+      i = j;
+    }
+  }
+  return stop == null ? null : { stack, mode: '', start: end };
+}
+/** 光标所在的补全位置：参数类型（[{ 这一层的键）或参数对象中的属性（type 为参数类型，path 为属性路径） */
+function paramsPlace(stack) {
+  if (stack.length === 2 && stack[0].ch === '[') return { kind: 'type' };
+  if (stack.length >= 3 && stack[0].ch === '[' && stack[2].seg) return { kind: 'prop', type: stack[2].seg, path: stack.slice(3).map(c => c.seg).join('.') };
+  return null;
+}
+const JAVA_COMMON = [
+  ['java.lang.String', '"'], ['java.lang.Long', '0'], ['java.lang.Integer', '0'], ['java.lang.Boolean', 'f'], ['java.lang.Double', '0'],
+  ['java.math.BigDecimal', '0'], ['java.util.List', '['], ['java.util.Map', '{'], ['java.util.Date', '"'], ['java.time.LocalDateTime', '"'],
+  ['long', '0'], ['int', '0'], ['boolean', 'f'], ['double', '0'],
+];
+/** 已打开文件（不含当前请求）中出现过的参数类型与属性名 */
+function paramsCorpus(d, self) {
+  const iface = (self.props.interface || '').trim();
+  const method = (self.props.method || '').trim();
+  const root = iface.split('.').slice(0, 3).join('.') + '.';
+  const types = new Map(), exact = new Map(), bySeg = new Map(), all = new Map(), kinds = new Map();
+  const bump = (m, k, key) => {
+    let x = m.get(k);
+    if (!x) m.set(k, x = new Map());
+    x.set(key, (x.get(key) || 0) + 1);
+  };
+  S.docs.forEach(doc => doc.byId.forEach(x => {
+    if (x === self || x.kind !== 'dubbo' || !x.props.params) return;
+    const sameIface = (x.props.interface || '').trim() === iface;
+    const group = sameIface && (x.props.method || '').trim() === method ? 0 : sameIface ? 1 : 2;
+    scanParams(x.props.params, null, (stack, key, kind) => {
+      const pl = paramsPlace(stack);
+      if (!pl) return;
+      if (pl.kind === 'type') {
+        let t = types.get(key);
+        if (!t) types.set(key, t = { name: key, kind, count: 0, group: 9 });
+        t.count++;
+        t.group = Math.min(t.group, group === 2 && key.startsWith(root) ? 2 : group === 2 ? 3 : group);
+      } else {
+        bump(exact, pl.type + '|' + pl.path, key);
+        bump(bySeg, pl.path ? pl.path.split('.').pop() : '|' + pl.type, key);
+        all.set(key, (all.get(key) || 0) + 1);
+        if (!kinds.has(key)) kinds.set(key, kind);
+      }
+    });
+  }));
+  JAVA_COMMON.forEach(([name, kind]) => { if (!types.has(name)) types.set(name, { name, kind, count: 0, group: 4 }); });
+  return { types, exact, bySeg, all, kinds };
+}
+/** 属性名匹配：前缀 > 包含 > 驼峰首字母 */
+function matchProp(name, q) {
+  if (!q) return { rank: 0 };
+  const l = name.toLowerCase();
+  const i = l.indexOf(q);
+  if (i >= 0) return { rank: i === 0 ? 0 : 1, at: i, len: q.length };
+  if (q.length > 1 && (name[0] + name.slice(1).replace(/[^A-Z]/g, '')).toLowerCase().startsWith(q)) return { rank: 2 };
+  return null;
+}
+/** 值的占位：对象 {}、列表 []、字符串 ""，光标放在里面；数字、布尔等留空 */
+const valueStub = kind => (kind === '{' || kind === '[' ? kind + (kind === '{' ? '}' : ']') : kind === '"' ? '""' : '');
+/** 参数编辑器内的补全：输入参数类型的键时补全类名（逐级包名），输入参数对象中的键时补全属性名 */
+function paramsComplete(d, n, editor) {
+  const ta = editor.ed.ta;
+  let corpus = null, place = null, ctx = null;
+  const list = acList({
+    row: it => {
+      if (place.kind === 'prop') return { kids: [h('span', { class: 'ac-n' }, h('b', null, acMark(it.name, 0, it.at, it.len)))] };
+      const base = it.name.lastIndexOf('.', it.pkg ? it.name.length - 2 : it.name.length) + 1;
+      return {
+        cls: it.pkg ? 'pkg' : '',
+        title: it.name,
+        kids: [it.pkg ? I('folder', 'xs') : null,
+          h('span', { class: 'ac-n' },
+            h('span', { class: 'pkg' }, acMark(it.name.slice(0, base), 0, it.at, it.len)),
+            h('b', null, acMark(it.name.slice(base), base, it.at, it.len))),
+          it.group === 0 ? h('span', { class: 'ac-c' }, '本方法') : it.group === 1 ? h('span', { class: 'ac-c' }, '本接口') : null],
+      };
+    },
+    pick: it => {
+      const v = ta.value;
+      const caret = ta.selectionStart;
+      const a = ctx.start;
+      if (it.pkg) {
+        ta.setSelectionRange(a, caret);
+        insertText(ta, '"' + it.name);
+        return;
+      }
+      const rest = v.slice(caret);
+      const m = ctx.mode === 'quoted' ? /^[^"\n]*"/.exec(rest) : /^[^\s,:{}[\]"]*/.exec(rest);
+      const b = caret + (m ? m[0].length : 0);
+      const hasColon = /^\s*:/.test(v.slice(b));
+      const stub = hasColon ? '' : valueStub(it.kind || (place.kind === 'type' ? '{' : ''));
+      const text = '"' + it.name + '"' + (hasColon ? '' : ': ' + stub);
+      list.hide();
+      ta.setSelectionRange(a, b);
+      insertText(ta, text);
+      const pos = a + text.length - (stub ? 1 : 0);
+      ta.setSelectionRange(pos, pos);
+    },
+  });
+  editor.append(list.box);
+  const update = () => {
+    const caret = ta.selectionStart;
+    if (ta.selectionEnd !== caret) return list.hide();
+    ctx = scanParams(ta.value, caret);
+    place = ctx && ctx.mode ? paramsPlace(ctx.stack) : null;
+    if (!place) return list.hide();
+    if (!corpus) corpus = paramsCorpus(d, n);
+    const q = ta.value.slice(ctx.mode === 'quoted' ? ctx.start + 1 : ctx.start, caret).toLowerCase();
+    let items;
+    if (place.kind === 'type') {
+      const cands = [];
+      corpus.types.forEach(t => { const m = matchIface(t.name, q); if (m && t.name.toLowerCase() !== q) cands.push(Object.assign({}, t, m)); });
+      cands.sort((x, y) => x.rank - y.rank || x.group - y.group || y.count - x.count || (x.name < y.name ? -1 : 1));
+      const pkgs = q ? nextPackages(cands.map(c => Object.assign({ here: c.group < 4 }, c)), q) : [];
+      items = pkgs.concat(cands).slice(0, 40);
+    } else {
+      const have = new Set(ctx.stack[ctx.stack.length - 1].keys);
+      const seg = place.path ? place.path.split('.').pop() : '|' + place.type;
+      const merged = new Map();
+      [corpus.exact.get(place.type + '|' + place.path), corpus.bySeg.get(seg), corpus.all].forEach((m, group) => {
+        if (m) m.forEach((count, name) => { if (!merged.has(name)) merged.set(name, { name, group, count }); });
+      });
+      items = [];
+      merged.forEach(it => {
+        if (have.has(it.name) || it.name.toLowerCase() === q) return;
+        const m = matchProp(it.name, q);
+        if (m) items.push(Object.assign(it, m, { kind: corpus.kinds.get(it.name) }));
+      });
+      items = items.sort((x, y) => x.rank - y.rank || x.group - y.group || y.count - x.count || (x.name < y.name ? -1 : 1)).slice(0, 30);
+    }
+    if (!items.length) return list.hide();
+    const width = place.kind === 'type' ? 520 : 280;
+    const xy = editor.ed.caretXY(ctx.start);
+    const maxLeft = Math.max(0, editor.clientWidth - width - 8);
+    Object.assign(list.box.style, { left: Math.min(Math.max(0, xy.x), maxLeft) + 'px', top: xy.y + 2 + 'px', width: Math.min(width, editor.clientWidth - 8) + 'px' });
+    list.show(items);
+  };
+  ta.addEventListener('input', e => {
+    if (e.inputType === 'insertText' || (list.st.shown && e.inputType && e.inputType.startsWith('delete'))) update();
+    else list.hide();
+  });
+  editor.ed.onKey(e => {
+    if (e.key === ' ' && e.ctrlKey) { e.preventDefault(); update(); return true; }
+    return list.key(e);
+  });
+  ta.addEventListener('blur', () => { list.hide(); corpus = null; });
+  ta.addEventListener('mousedown', () => list.hide());
+  ta.addEventListener('scroll', () => list.hide());
+}
+const acMark = (text, from, at, len) => {
+  if (at == null) return text;
+  const a = Math.max(0, at - from), b = Math.min(text.length, at + len - from);
+  return a >= b ? text : [text.slice(0, a), h('mark', null, text.slice(a, b)), text.slice(b)];
+};
+/** 接口名 / 方法名之间的分隔线：拖动调整方法名宽度（占整栏的百分比），双击恢复默认 */
+function endpointSplit(methodInput) {
+  const saved = +localStorage.getItem('dl.methodW');
+  if (saved) Object.assign(methodInput.style, { width: saved + '%', maxWidth: 'none' });
+  const r = h('div', { class: 'sep', title: '拖动调整宽度，双击恢复默认' });
+  r.addEventListener('dblclick', () => {
+    localStorage.removeItem('dl.methodW');
+    Object.assign(methodInput.style, { width: '', maxWidth: '' });
+  });
+  r.addEventListener('mousedown', e => {
+    e.preventDefault();
+    const box = r.parentElement.getBoundingClientRect();
+    const right = methodInput.getBoundingClientRect().right;
+    const offset = right - e.clientX - methodInput.getBoundingClientRect().width;
+    const move = ev => {
+      const pct = Math.max(10, Math.min(75, ((right - ev.clientX - offset) / box.width) * 100));
+      Object.assign(methodInput.style, { width: pct + '%', maxWidth: 'none' });
+      localStorage.setItem('dl.methodW', pct.toFixed(1));
+    };
+    const up = () => { removeEventListener('mousemove', move); removeEventListener('mouseup', up); document.body.style.cursor = ''; r.classList.remove('on'); };
+    addEventListener('mousemove', move);
+    addEventListener('mouseup', up);
+    document.body.style.cursor = 'col-resize';
+    r.classList.add('on');
+  });
+  return r;
 }
 function hResizer() {
   const r = h('div', { class: 'hresizer' });
@@ -1937,6 +2645,7 @@ addEventListener('drop', async e => {
   es.onerror = () => {};
   try {
     S.state = await api('state');
+    applyTheme(S.state.theme);
     for (const x of S.state.docs) applyDoc(await api('doc', { docId: x.id }));
     if (S.docs.length) S.cur = S.docs[0].id;
   } catch (e) {
