@@ -24,6 +24,8 @@ final class Settings {
         List<String> recent = new ArrayList<>();
         /** 额外的 jar 目录或 jar 文件：脚本中用到的公司工具类、groovy 等 */
         List<String> extPaths = new ArrayList<>();
+        /** 界面主题：system（跟随系统）/ light / dark */
+        String theme = "system";
     }
 
     private Data data = new Data();
@@ -75,6 +77,15 @@ final class Settings {
 
     synchronized void removeRecent(String p) {
         data.recent.remove(p);
+        save();
+    }
+
+    synchronized String theme() {
+        return "light".equals(data.theme) || "dark".equals(data.theme) ? data.theme : "system";
+    }
+
+    synchronized void setTheme(String theme) {
+        data.theme = theme;
         save();
     }
 

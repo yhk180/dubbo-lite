@@ -212,6 +212,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
             panel.nameFieldStringValue = (body["name"] as? String) ?? "未命名.jmx"
             if !dir.isEmpty { panel.directoryURL = URL(fileURLWithPath: dir) }
             panel.beginSheetModal(for: window) { r in self.reply(id, r == .OK ? panel.url?.path : nil) }
+        case "theme":
+            // 标题栏等原生部分与页面主题一致；system 时跟随系统
+            let t = body["theme"] as? String
+            NSApp.appearance = t == "dark" ? NSAppearance(named: .darkAqua) : t == "light" ? NSAppearance(named: .aqua) : nil
+            reply(id, nil)
         default:
             reply(id, nil)
         }

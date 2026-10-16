@@ -10,10 +10,11 @@ B=$ROOT/build/win
 rm -rf "$OUT" "$B" && mkdir -p "$OUT/app" "$B"
 
 echo "  · 图标与清单"
-if command -v qlmanage >/dev/null && qlmanage -t -s 1024 -o "$B" $ROOT/src/main/resources/web/icon.svg >/dev/null 2>&1; then
+# macOS 上用 NSImage 渲染为透明背景（qlmanage 的缩略图带白底，图标四角会有白边）
+if command -v swiftc >/dev/null && swiftc -O -o "$B/svg2png" $ROOT/shell/svg2png.swift -framework AppKit 2>"$B/svg2png.log"; then
   PNGS=()
   for s in 16 24 32 48 64 128 256; do
-    sips -z $s $s "$B/icon.svg.png" --out "$B/i$s.png" >/dev/null
+    "$B/svg2png" $ROOT/src/main/resources/web/icon.svg "$B/i$s.png" $s
     PNGS+=("$B/i$s.png")
   done
   python3 make_ico.py "$B/app.ico" "${PNGS[@]}"

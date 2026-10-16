@@ -77,6 +77,7 @@ const ICONS = {
   power: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>',
   up: '<path d="m18 15-6-6-6 6"/>',
   down: '<path d="m6 9 6 6 6-6"/>',
+  check: '<path d="m5 12.5 4.5 4.5L19 7"/>',
   eraser: '<path d="m7 21-4.3-4.3a1 1 0 0 1 0-1.4l10-10a1 1 0 0 1 1.4 0l5.6 5.6a1 1 0 0 1 0 1.4L13 21"/><path d="M22 21H7M5 11l9 9"/>',
 };
 function I(name, cls = '') {
@@ -536,6 +537,29 @@ function editorKeys(e, ta) {
     } else insertText(ta, '\n' + ind + extra);
   }
 }
+/** 点分名称（如 com.zto.voice.dto.DistributeCmd）：双击只选中其中一段，三击选中整个名称；不含 . 的内容保持默认行为 */
+function dottedSelect(el) {
+  const W = /[\w$]/, N = /[\w$.]/;
+  let caret = -1;
+  el.addEventListener('click', e => {
+    if (e.detail === 1) { caret = el.selectionStart; return; }
+    if (e.detail > 3 || caret < 0) return;
+    const v = el.value;
+    const i = W.test(v[caret] || '') ? caret : W.test(v[caret - 1] || '') ? caret - 1 : -1;
+    if (i < 0) return;
+    let a = i, b = i + 1;
+    while (a > 0 && N.test(v[a - 1])) a--;
+    while (b < v.length && N.test(v[b])) b++;
+    while (v[a] === '.') a++;
+    while (b > a && v[b - 1] === '.') b--;
+    if (!v.slice(a, b).includes('.')) return;
+    if (e.detail === 3) return el.setSelectionRange(a, b);
+    let x = i, y = i + 1;
+    while (x > 0 && W.test(v[x - 1])) x--;
+    while (y < v.length && W.test(v[y])) y++;
+    el.setSelectionRange(x, y);
+  });
+}
 const measureCtx = document.createElement('canvas').getContext('2d');
 function codeEditor({ value = '', lang = 'json', onChange, readOnly, hint, tools }) {
   const gutter = h('div', { class: 'gutter' });
@@ -543,6 +567,7 @@ function codeEditor({ value = '', lang = 'json', onChange, readOnly, hint, tools
   const ta = h('textarea', { spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off', autocorrect: 'off', wrap: 'off' });
   ta.value = value;
   if (readOnly) ta.readOnly = true;
+  dottedSelect(ta);
   const hintEl = hint ? h('div', { class: 'empty-hint' }, hint) : null;
   const stripe = h('div', { class: 'diag-line' });
   const root = h('div', { class: 'code' }, gutter, h('div', { class: 'body' }, stripe, pre, ta), hintEl, tools ? h('div', { class: 'float' }, tools) : null);
@@ -687,7 +712,9 @@ function showMenu(x, y, items) {
     else {
       m.append(h('div', {
         class: 'mi' + (it.danger ? ' danger' : ''),
+        title: it.title || null,
         onclick: () => { closeMenu(); it.run(); },
+        oncontextmenu: it.context ? e => { e.preventDefault(); it.context(e); } : null,
       }, it.icon ? I(it.icon, 's') : h('span', { style: { width: '14px' } }), it.text, it.key ? h('span', { class: 'k' }, it.key) : null));
     }
   }
@@ -1074,7 +1101,7 @@ function renderTop() {
     h('div', { class: 'brand' }, h('img', { src: 'icon.svg', alt: '' }), h('span', null, 'Dubbo Lite')),
     els.tabs,
     h('div', { class: 'actions' },
-      h('button', { class: 'btn ghost', title: '打开 (' + MOD + 'O)', onclick: openDialog }, I('open', 's'), '打开'),
+      h('button', { class: 'btn ghost', title: '打开最近的文件，或从文件夹打开 (' + MOD + 'O)', onclick: e => openMenu(e.currentTarget) }, I('open', 's'), '打开', I('down', 'xs')),
       h('button', { class: 'btn ghost', title: '新建测试计划', onclick: newDoc }, I('plus', 's'), '新建'),
       els.saveBtn = h('button', { class: 'btn', title: '保存 (' + MOD + 'S)', onclick: () => save(doc()) }, I('save', 's'), '保存'),
       h('button', { class: 'btn ghost icon', title: '更多', onclick: e => moreMenu(e.currentTarget) }, I('more'))));
@@ -1114,8 +1141,56 @@ function moreMenu(btn) {
     { text: '重置 Dubbo 连接', icon: 'refresh', run: resetConnections },
     d && { text: '清空会话变量', icon: 'eraser', run: clearVars },
     '-',
+    { label: '主题' },
+    ...THEMES.map(([v, text]) => ({ text, icon: (S.state.theme || 'system') === v ? 'check' : null, run: () => setTheme(v) })),
+    '-',
     { text: '设置…', icon: 'gear', run: showSettings },
   ]);
+}
+/** “打开”菜单：最近打开的文件 + 从文件夹打开 */
+function openMenu(btn) {
+  const r = btn.getBoundingClientRect();
+  const recent = (S.state.recent || []).slice(0, 10);
+  const home = (S.state.home || '').replace(/[\\/]\.dubbo-lite$/, '');
+  const where = p => {
+    let dir = dirOf(p);
+    if (home && dir.startsWith(home)) dir = '~' + dir.slice(home.length);
+    return dir.length > 32 ? '…' + dir.slice(-31) : dir;
+  };
+  showMenu(r.left, r.bottom + 6, [
+    recent.length && { label: '最近打开' },
+    ...recent.map(p => ({ text: baseName(p), icon: 'file', key: where(p), title: p + '\n右键可从列表移除', run: () => openPath(p), context: e => recentMenu(e, p) })),
+    recent.length && '-',
+    { text: '从文件夹打开…', icon: 'folder', key: MOD + 'O', run: openDialog },
+  ]);
+}
+/** 最近打开的右键菜单 */
+function recentMenu(e, p) {
+  showMenu(e.clientX, e.clientY, [{ text: '从最近打开中移除', icon: 'x', run: () => forgetRecent(p) }]);
+}
+async function forgetRecent(p) {
+  try {
+    S.state = await api('removeRecent', { path: p });
+  } catch (e) {
+    return toast(e.message, true);
+  }
+  if (!doc()) render();
+}
+const THEMES = [['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']];
+/** 界面主题：system 跟随系统，light / dark 固定；macOS 外壳同步标题栏外观 */
+function applyTheme(t) {
+  const theme = t === 'light' || t === 'dark' ? t : 'system';
+  if (theme === 'system') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', theme);
+  if (MAC_BRIDGE) nativeCall({ type: 'theme', theme });
+}
+async function setTheme(t) {
+  applyTheme(t);
+  try {
+    S.state = await api('settings', { theme: t });
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 function welcome() {
   const recent = S.state.recent || [];
@@ -1129,12 +1204,12 @@ function welcome() {
         h('button', { class: 'btn', onclick: newDoc }, I('plus', 's'), '新建测试计划')),
       recent.length ? h('div', { class: 'recent' },
         h('h3', null, '最近打开'),
-        recent.map(p => h('div', { class: 'rec', onclick: () => openPath(p) },
+        recent.map(p => h('div', { class: 'rec', title: p, onclick: () => openPath(p), oncontextmenu: e => { e.preventDefault(); recentMenu(e, p); } },
           h('span', { class: 'ic' }, I('file')),
           h('div', { class: 'grow' }, h('div', { class: 'n' }, baseName(p)), h('div', { class: 'p' }, '‎' + dirOf(p))),
           h('button', {
             class: 'btn ghost sm icon x', title: '从列表移除',
-            onclick: async e => { e.stopPropagation(); S.state = await api('removeRecent', { path: p }); render(); },
+            onclick: e => { e.stopPropagation(); forgetRecent(p); },
           }, I('x', 'xs'))))) : null,
       h('div', { class: 'drop-hint' }, '也可以把 .jmx 文件直接拖进窗口')));
 }
@@ -1469,6 +1544,7 @@ function subtabs(tabs, cur, onPick, right) {
 function viewRequest(d, n, c) {
   const { f, from } = effective(d, n);
   const ifaceInput = h('input', { class: 'iface', value: n.props.interface, placeholder: 'com.example.api.FooService', spellcheck: 'false', oninput: e => { queue(d, n, { props: { interface: e.target.value } }); } });
+  dottedSelect(ifaceInput);
   const setMethod = v => {
     queue(d, n, { props: { method: v } });
     const m = els.tree.querySelector(`.row[data-id="${n.id}"] .meta`);
@@ -2569,6 +2645,7 @@ addEventListener('drop', async e => {
   es.onerror = () => {};
   try {
     S.state = await api('state');
+    applyTheme(S.state.theme);
     for (const x of S.state.docs) applyDoc(await api('doc', { docId: x.id }));
     if (S.docs.length) S.cur = S.docs[0].id;
   } catch (e) {

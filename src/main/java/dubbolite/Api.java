@@ -129,6 +129,9 @@ final class Api {
                     }
                     settings.setExtPaths(l);
                 }
+                if (in.has("theme")) {
+                    settings.setTheme(str(in, "theme"));
+                }
                 return state();
             }
             case "removeRecent":
@@ -152,6 +155,7 @@ final class Api {
         JsonObject o = new JsonObject();
         o.add("recent", Json.GSON.toJsonTree(settings.recent()));
         o.add("extPaths", Json.GSON.toJsonTree(settings.extPaths()));
+        o.addProperty("theme", settings.theme());
         o.addProperty("home", Settings.HOME.toString());
         o.addProperty("version", Main.VERSION);
         o.addProperty("java", System.getProperty("java.version"));
@@ -168,6 +172,11 @@ final class Api {
         return o;
     }
 
+    private void forgetRecent(Path path, Path abs) {
+        settings.removeRecent(path.toString());
+        settings.removeRecent(abs.toString());
+    }
+
     private JsonObject open(Path path) throws Exception {
         Path abs = path.toAbsolutePath().normalize();
         for (JmxDoc d : docs.values()) {
@@ -176,11 +185,22 @@ final class Api {
                 return d.toJson();
             }
         }
+        // 不存在或无法读取的文件同时从“最近打开”中移除
         if (!Files.isRegularFile(abs)) {
-            settings.removeRecent(abs.toString());
-            throw new IllegalArgumentException("文件不存在: " + abs);
+            forgetRecent(path, abs);
+            throw new IllegalArgumentException("文件不存在，已从最近打开中移除：" + abs);
         }
-        JmxDoc d = JmxDoc.load(abs);
+        JmxDoc d;
+        try {
+            if (!Files.isReadable(abs)) {
+                throw new java.nio.file.AccessDeniedException(abs.toString());
+            }
+            d = JmxDoc.load(abs);
+        } catch (java.io.IOException e) {
+            forgetRecent(path, abs);
+            throw new IllegalArgumentException("无法读取文件，已从最近打开中移除：" + abs
+                    + (e instanceof java.nio.file.AccessDeniedException ? "（没有读取权限）" : "（" + e.getMessage() + "）"));
+        }
         settings.touchRecent(abs);
         return register(d, null);
     }
