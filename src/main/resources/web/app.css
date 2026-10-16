@@ -319,17 +319,7 @@ svg.i.xs { width: 12px; height: 12px; }
 .code.warn .diag-line { background: var(--warn-soft); }
 .code.warn .gutter div.mark { color: var(--warn); }
 .code .gutter div.mark { color: var(--err); font-weight: 600; }
-.code .diag {
-  display: none; position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; align-items: center; gap: 8px; min-height: 28px; padding: 4px 14px;
-  font: 12px/1.45 var(--ui); border-top: 1px solid var(--line); background: var(--bg); cursor: pointer;
-}
-.code.has-diag .diag { display: flex; }
-.code.has-diag textarea { padding-bottom: 40px; }
-.code .diag.err { color: var(--err); background: linear-gradient(var(--err-soft), var(--err-soft)), var(--bg); }
-.code .diag.warn { color: var(--warn); background: linear-gradient(var(--warn-soft), var(--warn-soft)), var(--bg); }
-.code .diag b { font-weight: 600; flex: none; }
-.code .diag span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.code .diag svg { flex: none; }
+.code.diag-nopos .gutter { box-shadow: inset -2px 0 var(--err); }
 .code .empty-hint { position: absolute; left: 58px; top: 10px; color: var(--faint); pointer-events: none; white-space: pre; }
 .t-key { color: var(--c-key); }
 .t-type { color: var(--c-type); font-weight: 600; }

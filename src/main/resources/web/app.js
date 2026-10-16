@@ -536,6 +536,7 @@ function editorKeys(e, ta) {
     } else insertText(ta, '\n' + ind + extra);
   }
 }
+const measureCtx = document.createElement('canvas').getContext('2d');
 function codeEditor({ value = '', lang = 'json', onChange, readOnly, hint, tools }) {
   const gutter = h('div', { class: 'gutter' });
   const pre = h('pre');
@@ -544,9 +545,8 @@ function codeEditor({ value = '', lang = 'json', onChange, readOnly, hint, tools
   if (readOnly) ta.readOnly = true;
   const hintEl = hint ? h('div', { class: 'empty-hint' }, hint) : null;
   const stripe = h('div', { class: 'diag-line' });
-  const bar = h('div', { class: 'diag' });
-  const root = h('div', { class: 'code' }, gutter, h('div', { class: 'body' }, stripe, pre, ta), hintEl, tools ? h('div', { class: 'float' }, tools) : null, bar);
-  /** 当前的错误/警告：{ level: 'err' | 'warn', msg, pos?, line? } */
+  const root = h('div', { class: 'code' }, gutter, h('div', { class: 'body' }, stripe, pre, ta), hintEl, tools ? h('div', { class: 'float' }, tools) : null);
+  /** 当前的错误/警告：{ level: 'err' | 'warn', pos?, line? }（只做视觉提示：出错行底色 + 行号标红；没有位置时行号栏边缘标红） */
   let diag = null;
   function placeDiag() {
     stripe.style.display = diag && diag.line ? '' : 'none';
@@ -576,41 +576,38 @@ function codeEditor({ value = '', lang = 'json', onChange, readOnly, hint, tools
     sync();
   }
   ta.addEventListener('scroll', sync);
-  bar.addEventListener('click', () => {
-    if (!diag || diag.pos == null) return;
-    ta.focus();
-    ta.setSelectionRange(diag.pos, diag.pos);
-    ta.scrollTop = Math.max(0, (diag.line - 1) * 20 - ta.clientHeight / 2);
-  });
   ta.addEventListener('input', () => {
     paint();
     if (onChange) onChange(ta.value);
   });
-  ta.addEventListener('keydown', e => editorKeys(e, ta));
+  /** 补全弹窗等先处理按键，返回 true 表示已处理 */
+  const keyHooks = [];
+  ta.addEventListener('keydown', e => { if (!keyHooks.some(f => f(e))) editorKeys(e, ta); });
   paint();
   root.ed = {
     get: () => ta.value,
     set: v => { ta.value = v; paint(); },
-    /** 显示（或清除）一条错误/警告：pos 为字符位置，对应行高亮，点击提示栏跳到该处 */
+    /** 显示（或清除）一条错误/警告：pos 为字符位置，对应行高亮 */
     diag: dg => {
       diag = dg || null;
-      root.classList.toggle('has-diag', !!diag);
+      if (diag && diag.pos != null) diag.line = ta.value.slice(0, diag.pos).split('\n').length;
       root.classList.toggle('warn', !!diag && diag.level === 'warn');
-      bar.innerHTML = '';
-      if (diag) {
-        if (diag.pos != null) {
-          const before = ta.value.slice(0, diag.pos);
-          diag.line = before.split('\n').length;
-          diag.col = diag.pos - before.lastIndexOf('\n');
-        }
-        bar.className = 'diag ' + diag.level;
-        bar.title = diag.pos != null ? '点击跳到出错位置' : '';
-        bar.append(I(diag.level === 'err' ? 'x' : 'info', 'xs'),
-          diag.line ? h('b', null, '第 ' + diag.line + ' 行' + (diag.col ? '第 ' + diag.col + ' 列' : '')) : null,
-          h('span', null, diag.msg));
-      }
+      root.classList.toggle('diag-nopos', !!diag && !diag.line);
       placeDiag();
     },
+    /** 字符位置在编辑器内的坐标（行底部），用于定位补全弹窗 */
+    caretXY: pos => {
+      const v = ta.value;
+      const ls = v.lastIndexOf('\n', pos - 1) + 1;
+      const line = v.slice(0, ls).split('\n').length - 1;
+      measureCtx.font = getComputedStyle(ta).font;
+      return {
+        x: gutter.offsetWidth + 6 + measureCtx.measureText(v.slice(ls, pos)).width - ta.scrollLeft,
+        y: 10 + (line + 1) * 20 - ta.scrollTop,
+      };
+    },
+    onKey: f => keyHooks.push(f),
+    root,
     replaceAll: v => { ta.focus(); ta.select(); insertText(ta, v); },
     focus: () => ta.focus(),
     ta,
@@ -1526,6 +1523,7 @@ function viewRequest(d, n, c) {
     editor = codeEditor({ value: n.props.params || '', lang: 'json', hint: PARAM_HINT, onChange: v => { queue(d, n, { props: { params: v } }); check(); } });
     check = paramsChecker(editor, n.flavor === 'dandelion');
     check(0);
+    paramsComplete(d, n, editor);
     body.append(editor);
   } else if (tab === 'conn') {
     body.append(connForm(d, n, from));
@@ -1623,64 +1621,91 @@ const sniffServices = (reg, refresh) => sniff('sniffServices', { protocol: reg.p
 const sniffProviders = (reg, iface, refresh) => sniff('sniffProviders', { protocol: reg.protocol, address: reg.address, group: reg.group, iface }, 30000, refresh);
 
 /**
- * 输入框的下拉候选。compute(q, typed) 返回 { items, head, foot }（返回空则不显示）；
- * typed 表示聚焦后是否输入过。↑↓ 选择，↵/Tab 确认，Esc 关闭。refresh() 在异步数据到达后重算
+ * 候选列表弹窗（输入框下拉与编辑器内补全共用）：show(items, head, foot, active) 显示，
+ * key(e) 处理 ↑↓ 选择、↵/Tab 确认、Esc 关闭，已处理时返回 true
  */
-function dropdown(input, { compute, row, pick, openOnFocus, initial, minWidth = 360 }) {
+function acList({ row, pick }) {
   const box = h('div', { class: 'ac', style: { display: 'none' } });
-  let items = [], active = 0, shown = false, typed = false;
-  const close = () => { box.style.display = 'none'; items = []; shown = false; };
-  const paint = (head, foot) => {
+  const st = { items: [], active: 0, shown: false };
+  const hide = () => { box.style.display = 'none'; st.items = []; st.shown = false; };
+  const mark = () => {
+    box.querySelectorAll('.ac-i').forEach((x, i) => x.classList.toggle('on', i === st.active));
+    const on = box.querySelector('.ac-i.on');
+    if (on) on.scrollIntoView({ block: 'nearest' });
+  };
+  const show = (items, head, foot, active) => {
+    st.items = items;
+    st.active = Math.min(Math.max(0, active || 0), Math.max(0, items.length - 1));
+    st.shown = true;
+    box.style.display = '';
     box.innerHTML = '';
     if (head) box.append(head);
     items.forEach((it, i) => {
       const r = row(it);
-      const el = h('div', { class: 'ac-i' + (i === active ? ' on' : '') + (r.cls ? ' ' + r.cls : ''), title: r.title || '' }, r.kids);
+      const el = h('div', { class: 'ac-i' + (r.cls ? ' ' + r.cls : ''), title: r.title || '' }, r.kids);
       el.addEventListener('mousedown', e => { e.preventDefault(); pick(it); });
-      el.addEventListener('mousemove', () => {
-        if (active === i) return;
-        box.querySelectorAll('.ac-i.on').forEach(x => x.classList.remove('on'));
-        el.classList.add('on');
-        active = i;
-      });
+      el.addEventListener('mousemove', () => { if (st.active !== i) { st.active = i; mark(); } });
       box.append(el);
     });
     if (foot) box.append(foot);
-    const on = box.querySelector('.ac-i.on');
-    if (on) on.scrollIntoView({ block: 'nearest' });
+    mark();
   };
+  const key = e => {
+    if (!st.shown) return false;
+    if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && st.items.length) {
+      e.preventDefault();
+      st.active = (st.active + (e.key === 'ArrowDown' ? 1 : st.items.length - 1)) % st.items.length;
+      mark();
+      return true;
+    }
+    if (st.items.length && (e.key === 'Enter' || e.key === 'Tab') && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+      e.preventDefault();
+      pick(st.items[st.active]);
+      return true;
+    }
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      hide();
+      return true;
+    }
+    return false;
+  };
+  return { box, st, show, hide, key };
+}
+/**
+ * 输入框的下拉候选。compute(q, typed) 返回 { items, head, foot }（返回空则不显示）；
+ * typed 表示聚焦后是否输入过。refresh() 在异步数据到达后重算
+ */
+function dropdown(input, { compute, row, pick, openOnFocus, initial, minWidth = 360 }) {
+  const list = acList({ row, pick });
+  const { box, st } = list;
+  // want：用户期望下拉打开（异步数据到达前 compute 可能返回空，到达后由 refresh 再打开）
+  let typed = false, want = false;
   const open = keep => {
+    want = true;
     const r = compute(input.value.trim(), typed);
-    if (!r || (!(r.items || []).length && !r.head && !r.foot)) return close();
-    const hadItems = items.length > 0;
-    items = r.items || [];
-    active = keep && shown && hadItems ? Math.min(active, Math.max(0, items.length - 1)) : initial ? Math.max(0, initial(items)) : 0;
+    if (!r || (!(r.items || []).length && !r.head && !r.foot)) return list.hide();
+    const items = r.items || [];
+    const active = keep && st.shown && st.items.length ? st.active : initial ? initial(items) : 0;
     const wrap = input.parentElement.clientWidth;
     const width = Math.min(wrap, Math.max(minWidth, input.offsetWidth));
-    Object.assign(box.style, { display: '', left: Math.max(0, Math.min(input.offsetLeft, wrap - width)) + 'px', width: width + 'px' });
-    shown = true;
-    paint(r.head, r.foot);
+    Object.assign(box.style, { left: Math.max(0, Math.min(input.offsetLeft, wrap - width)) + 'px', width: width + 'px' });
+    list.show(items, r.head, r.foot, active);
   };
   input.addEventListener('input', () => { typed = true; open(); });
   input.addEventListener('focus', () => { typed = false; if (openOnFocus()) open(); });
+  const close = () => { want = false; list.hide(); };
   input.addEventListener('blur', close);
   input.addEventListener('keydown', e => {
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !st.shown) {
       e.preventDefault();
-      if (!shown) return open();
-      if (!items.length) return;
-      active = (active + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length;
-      box.querySelectorAll('.ac-i').forEach((x, i) => x.classList.toggle('on', i === active));
-      box.querySelector('.ac-i.on').scrollIntoView({ block: 'nearest' });
-    } else if (items.length && (e.key === 'Enter' || e.key === 'Tab') && !e.metaKey && !e.ctrlKey) {
-      e.preventDefault();
-      pick(items[active]);
-    } else if (shown && e.key === 'Escape') {
-      e.stopPropagation();
-      close();
+      open();
+    } else {
+      if (e.key === 'Escape') want = false;
+      list.key(e);
     }
   });
-  return { box, open, close, refresh: () => { if (shown && document.activeElement === input) open(true); } };
+  return { box, open, close, refresh: () => { if (want && document.activeElement === input) open(true); } };
 }
 /** 下拉框顶部/底部的说明行；action 为 [文字, 回调] 时右侧带一个按钮（如“刷新”） */
 function acNote(text, cls, action) {
@@ -1727,11 +1752,7 @@ function ifaceComplete(d, n, input, next) {
       const items = nextPackages(exact, q).concat(exact
         .sort((a, b) => a.rank - b.rank || b.here - a.here || b.count - a.count || (a.reg ? 1 : 0) - (b.reg ? 1 : 0) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)))
         .slice(0, 50);
-      const again = ['刷新', () => { refresh = true; dd.open(true); }];
-      const foot = !st ? null
-        : st.loading ? acNote('正在读取注册中心的服务列表…', 'muted')
-        : st.error ? acNote('注册中心：' + st.error, 'warn', ['重试', again[1]])
-        : acNote('注册中心共 ' + st.data.services.length + ' 个服务', 'muted', again);
+      const foot = st && st.error ? acNote('注册中心：' + st.error, 'warn', ['重试', () => { refresh = true; dd.open(true); }]) : null;
       return { items, foot };
     },
     row: it => ({
@@ -1775,7 +1796,7 @@ function methodComplete(d, n, input, onPick) {
       refresh = false;
       whenLoaded(st, dd, hooked);
       const again = () => { refresh = true; dd.open(true); };
-      if (st.loading) return { head: acNote('正在读取提供者…', 'muted') };
+      if (st.loading) return null;
       if (st.error) return { head: acNote('注册中心：' + st.error, 'warn', ['重试', again]) };
       const all = st.data.providers;
       if (!all.length) return { head: acNote('注册中心上没有该接口的提供者', 'warn', ['刷新', again]) };
@@ -1787,9 +1808,7 @@ function methodComplete(d, n, input, onPick) {
       ctx = { all, match, ver, grp };
       const uniq = a => [...new Set(a)];
       const vg = p => '版本 ' + (p.version || '（空）') + (p.group ? ' · 分组 ' + p.group : '');
-      const head = h('div', null,
-        acNote(use.length + ' 个提供者 · ' + uniq(use.map(p => p.application).filter(Boolean)).join('、') + ' · ' + uniq(use.map(vg)).join(' / '), 'muted', ['刷新', again]),
-        match.length ? null : acNote('没有' + vg({ version: ver, group: grp }) + ' 的提供者，下面是全部提供者的方法', 'warn'));
+      const head = match.length ? null : acNote('没有' + vg({ version: ver, group: grp }) + ' 的提供者，下面是全部提供者的方法', 'warn');
       const q = typed ? q0.toLowerCase() : '';
       const methods = uniq(use.flatMap(p => p.methods)).sort();
       const items = methods.filter(m => m.toLowerCase().includes(q))
@@ -1820,6 +1839,215 @@ function methodComplete(d, n, input, onPick) {
     },
   });
   return dd.box;
+}
+/* ---- 参数编辑器内补全：参数类名 + 属性名（来源于已打开文件中出现过的参数） */
+
+/**
+ * 宽松扫描参数文本 [{类型: 值}, ...]：容忍 YAML 标签、${变量}、未加引号的键和语法错误。
+ * 容器链 stack 每层 { ch: '{' | '[', seg: 在父容器中的键（数组元素为 '[]'）, keys: 已出现的键 }。
+ * onKey(stack, key, kind) 在每读完一个键时回调，kind 为值的首字符；
+ * 给定 stop 时扫描到该位置，返回 { stack, mode, start }：mode 为 'quoted' / 'bare' 表示光标正在输入一个键，start 为键的起始位置
+ */
+function scanParams(s, stop, onKey) {
+  const end = stop == null ? s.length : stop;
+  const stack = [];
+  const top = () => stack[stack.length - 1];
+  const keyPos = () => { const t = top(); return !!t && t.ch === '{' && t.expectKey; };
+  const keyDone = (key, j) => {
+    const t = top();
+    t.pending = key;
+    t.expectKey = false;
+    t.keys.push(key);
+    if (onKey) { const m = /^\s*:\s*(\S)/.exec(s.slice(j, j + 100)); onKey(stack, key, m ? m[1] : ''); }
+  };
+  let i = 0;
+  while (i < end) {
+    const c = s[i];
+    if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < s.length && s[j] !== c && s[j] !== '\n') j += s[j] === '\\' ? 2 : 1;
+      if (j >= end) return { stack, mode: keyPos() ? 'quoted' : '', start: i };
+      if (keyPos()) keyDone(s.slice(i + 1, j), j + 1);
+      i = j + 1;
+    } else if (c === '{' || c === '[') {
+      const p = top();
+      stack.push({ ch: c, seg: p ? (p.ch === '[' ? '[]' : p.pending) : null, keys: [], expectKey: c === '{', pending: null });
+      i++;
+    } else if (c === '}' || c === ']') {
+      stack.pop();
+      i++;
+    } else if (c === ',') {
+      const t = top();
+      if (t && t.ch === '{') { t.expectKey = true; t.pending = null; }
+      i++;
+    } else if (c === ':' || c === ' ' || c === '\t' || c === '\n' || c === '\r') {
+      i++;
+    } else if (c === '$' && s[i + 1] === '{') {
+      let depth = 0, j = i + 1;
+      for (; j < s.length && s[j] !== '\n'; j++) {
+        if (s[j] === '{') depth++;
+        else if (s[j] === '}' && --depth === 0) break;
+      }
+      if (j >= end) return { stack, mode: '', start: i };
+      i = j + 1;
+    } else if (c === '#' && (i === 0 || /\s/.test(s[i - 1]))) {
+      const j = s.indexOf('\n', i);
+      i = j < 0 ? s.length : j;
+    } else {
+      let j = i;
+      while (j < s.length && !/[\s,:{}[\]"]/.test(s[j])) j++;
+      if (j >= end) return { stack, mode: keyPos() ? 'bare' : '', start: i };
+      if (keyPos()) keyDone(s.slice(i, j), j);
+      i = j;
+    }
+  }
+  return stop == null ? null : { stack, mode: '', start: end };
+}
+/** 光标所在的补全位置：参数类型（[{ 这一层的键）或参数对象中的属性（type 为参数类型，path 为属性路径） */
+function paramsPlace(stack) {
+  if (stack.length === 2 && stack[0].ch === '[') return { kind: 'type' };
+  if (stack.length >= 3 && stack[0].ch === '[' && stack[2].seg) return { kind: 'prop', type: stack[2].seg, path: stack.slice(3).map(c => c.seg).join('.') };
+  return null;
+}
+const JAVA_COMMON = [
+  ['java.lang.String', '"'], ['java.lang.Long', '0'], ['java.lang.Integer', '0'], ['java.lang.Boolean', 'f'], ['java.lang.Double', '0'],
+  ['java.math.BigDecimal', '0'], ['java.util.List', '['], ['java.util.Map', '{'], ['java.util.Date', '"'], ['java.time.LocalDateTime', '"'],
+  ['long', '0'], ['int', '0'], ['boolean', 'f'], ['double', '0'],
+];
+/** 已打开文件（不含当前请求）中出现过的参数类型与属性名 */
+function paramsCorpus(d, self) {
+  const iface = (self.props.interface || '').trim();
+  const method = (self.props.method || '').trim();
+  const root = iface.split('.').slice(0, 3).join('.') + '.';
+  const types = new Map(), exact = new Map(), bySeg = new Map(), all = new Map(), kinds = new Map();
+  const bump = (m, k, key) => {
+    let x = m.get(k);
+    if (!x) m.set(k, x = new Map());
+    x.set(key, (x.get(key) || 0) + 1);
+  };
+  S.docs.forEach(doc => doc.byId.forEach(x => {
+    if (x === self || x.kind !== 'dubbo' || !x.props.params) return;
+    const sameIface = (x.props.interface || '').trim() === iface;
+    const group = sameIface && (x.props.method || '').trim() === method ? 0 : sameIface ? 1 : 2;
+    scanParams(x.props.params, null, (stack, key, kind) => {
+      const pl = paramsPlace(stack);
+      if (!pl) return;
+      if (pl.kind === 'type') {
+        let t = types.get(key);
+        if (!t) types.set(key, t = { name: key, kind, count: 0, group: 9 });
+        t.count++;
+        t.group = Math.min(t.group, group === 2 && key.startsWith(root) ? 2 : group === 2 ? 3 : group);
+      } else {
+        bump(exact, pl.type + '|' + pl.path, key);
+        bump(bySeg, pl.path ? pl.path.split('.').pop() : '|' + pl.type, key);
+        all.set(key, (all.get(key) || 0) + 1);
+        if (!kinds.has(key)) kinds.set(key, kind);
+      }
+    });
+  }));
+  JAVA_COMMON.forEach(([name, kind]) => { if (!types.has(name)) types.set(name, { name, kind, count: 0, group: 4 }); });
+  return { types, exact, bySeg, all, kinds };
+}
+/** 属性名匹配：前缀 > 包含 > 驼峰首字母 */
+function matchProp(name, q) {
+  if (!q) return { rank: 0 };
+  const l = name.toLowerCase();
+  const i = l.indexOf(q);
+  if (i >= 0) return { rank: i === 0 ? 0 : 1, at: i, len: q.length };
+  if (q.length > 1 && (name[0] + name.slice(1).replace(/[^A-Z]/g, '')).toLowerCase().startsWith(q)) return { rank: 2 };
+  return null;
+}
+/** 值的占位：对象 {}、列表 []、字符串 ""，光标放在里面；数字、布尔等留空 */
+const valueStub = kind => (kind === '{' || kind === '[' ? kind + (kind === '{' ? '}' : ']') : kind === '"' ? '""' : '');
+/** 参数编辑器内的补全：输入参数类型的键时补全类名（逐级包名），输入参数对象中的键时补全属性名 */
+function paramsComplete(d, n, editor) {
+  const ta = editor.ed.ta;
+  let corpus = null, place = null, ctx = null;
+  const list = acList({
+    row: it => {
+      if (place.kind === 'prop') return { kids: [h('span', { class: 'ac-n' }, h('b', null, acMark(it.name, 0, it.at, it.len)))] };
+      const base = it.name.lastIndexOf('.', it.pkg ? it.name.length - 2 : it.name.length) + 1;
+      return {
+        cls: it.pkg ? 'pkg' : '',
+        title: it.name,
+        kids: [it.pkg ? I('folder', 'xs') : null,
+          h('span', { class: 'ac-n' },
+            h('span', { class: 'pkg' }, acMark(it.name.slice(0, base), 0, it.at, it.len)),
+            h('b', null, acMark(it.name.slice(base), base, it.at, it.len))),
+          it.group === 0 ? h('span', { class: 'ac-c' }, '本方法') : it.group === 1 ? h('span', { class: 'ac-c' }, '本接口') : null],
+      };
+    },
+    pick: it => {
+      const v = ta.value;
+      const caret = ta.selectionStart;
+      const a = ctx.start;
+      if (it.pkg) {
+        ta.setSelectionRange(a, caret);
+        insertText(ta, '"' + it.name);
+        return;
+      }
+      const rest = v.slice(caret);
+      const m = ctx.mode === 'quoted' ? /^[^"\n]*"/.exec(rest) : /^[^\s,:{}[\]"]*/.exec(rest);
+      const b = caret + (m ? m[0].length : 0);
+      const hasColon = /^\s*:/.test(v.slice(b));
+      const stub = hasColon ? '' : valueStub(it.kind || (place.kind === 'type' ? '{' : ''));
+      const text = '"' + it.name + '"' + (hasColon ? '' : ': ' + stub);
+      list.hide();
+      ta.setSelectionRange(a, b);
+      insertText(ta, text);
+      const pos = a + text.length - (stub ? 1 : 0);
+      ta.setSelectionRange(pos, pos);
+    },
+  });
+  editor.append(list.box);
+  const update = () => {
+    const caret = ta.selectionStart;
+    if (ta.selectionEnd !== caret) return list.hide();
+    ctx = scanParams(ta.value, caret);
+    place = ctx && ctx.mode ? paramsPlace(ctx.stack) : null;
+    if (!place) return list.hide();
+    if (!corpus) corpus = paramsCorpus(d, n);
+    const q = ta.value.slice(ctx.mode === 'quoted' ? ctx.start + 1 : ctx.start, caret).toLowerCase();
+    let items;
+    if (place.kind === 'type') {
+      const cands = [];
+      corpus.types.forEach(t => { const m = matchIface(t.name, q); if (m && t.name.toLowerCase() !== q) cands.push(Object.assign({}, t, m)); });
+      cands.sort((x, y) => x.rank - y.rank || x.group - y.group || y.count - x.count || (x.name < y.name ? -1 : 1));
+      const pkgs = q ? nextPackages(cands.map(c => Object.assign({ here: c.group < 4 }, c)), q) : [];
+      items = pkgs.concat(cands).slice(0, 40);
+    } else {
+      const have = new Set(ctx.stack[ctx.stack.length - 1].keys);
+      const seg = place.path ? place.path.split('.').pop() : '|' + place.type;
+      const merged = new Map();
+      [corpus.exact.get(place.type + '|' + place.path), corpus.bySeg.get(seg), corpus.all].forEach((m, group) => {
+        if (m) m.forEach((count, name) => { if (!merged.has(name)) merged.set(name, { name, group, count }); });
+      });
+      items = [];
+      merged.forEach(it => {
+        if (have.has(it.name) || it.name.toLowerCase() === q) return;
+        const m = matchProp(it.name, q);
+        if (m) items.push(Object.assign(it, m, { kind: corpus.kinds.get(it.name) }));
+      });
+      items = items.sort((x, y) => x.rank - y.rank || x.group - y.group || y.count - x.count || (x.name < y.name ? -1 : 1)).slice(0, 30);
+    }
+    if (!items.length) return list.hide();
+    const width = place.kind === 'type' ? 520 : 280;
+    const xy = editor.ed.caretXY(ctx.start);
+    const maxLeft = Math.max(0, editor.clientWidth - width - 8);
+    Object.assign(list.box.style, { left: Math.min(Math.max(0, xy.x), maxLeft) + 'px', top: xy.y + 2 + 'px', width: Math.min(width, editor.clientWidth - 8) + 'px' });
+    list.show(items);
+  };
+  ta.addEventListener('input', e => {
+    if (e.inputType === 'insertText' || (list.st.shown && e.inputType && e.inputType.startsWith('delete'))) update();
+    else list.hide();
+  });
+  editor.ed.onKey(e => {
+    if (e.key === ' ' && e.ctrlKey) { e.preventDefault(); update(); return true; }
+    return list.key(e);
+  });
+  ta.addEventListener('blur', () => { list.hide(); corpus = null; });
+  ta.addEventListener('mousedown', () => list.hide());
+  ta.addEventListener('scroll', () => list.hide());
 }
 const acMark = (text, from, at, len) => {
   if (at == null) return text;
