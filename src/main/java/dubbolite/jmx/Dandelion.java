@@ -216,7 +216,7 @@ public final class Dandelion {
     }
 
     /** 解析编辑器文本 [{类型: 值}, ...]，值保留原始文本 */
-    static List<String[]> parseTyped(String text) {
+    public static List<String[]> parseTyped(String text) {
         String s = text == null ? "" : text;
         List<String[]> out = new ArrayList<>();
         int[] p = {0};

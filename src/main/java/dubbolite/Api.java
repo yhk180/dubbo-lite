@@ -6,6 +6,8 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 import dubbolite.jmx.JmxDoc;
 import dubbolite.run.DubboClient;
+import dubbolite.run.ParamCheck;
+import dubbolite.run.RegistrySniffer;
 import dubbolite.run.Runner;
 
 import javax.swing.JFileChooser;
@@ -29,6 +31,7 @@ final class Api {
 
     private final Settings settings;
     private final DubboClient client = new DubboClient();
+    private final RegistrySniffer sniffer = new RegistrySniffer();
     private final Properties props = new Properties();
     private final Runner runner;
     private final Map<String, JmxDoc> docs = new ConcurrentHashMap<>();
@@ -89,6 +92,13 @@ final class Api {
                 JmxDoc d = doc(in);
                 return runner.send(d, in.get("nodeId").getAsInt(), session(d));
             }
+            case "sniffServices":
+                return sniffer.services(str(in, "protocol"), str(in, "address"), str(in, "group"), bool(in, "refresh"));
+            case "sniffProviders":
+                return sniffer.providers(str(in, "protocol"), str(in, "address"), str(in, "group"), str(in, "iface"), bool(in, "refresh"));
+            case "checkParams": {
+                return ParamCheck.check(str(in, "text"), bool(in, "dandelion"));
+            }
             case "cancel": {
                 JsonObject o = new JsonObject();
                 o.addProperty("cancelled", runner.cancel(doc(in), in.get("nodeId").getAsInt()));
@@ -106,6 +116,7 @@ final class Api {
             case "reset": {
                 JsonObject o = new JsonObject();
                 o.addProperty("count", client.reset());
+                sniffer.reset();
                 return o;
             }
             case "settings": {
@@ -226,6 +237,11 @@ final class Api {
 
     private Runner.Session session(JmxDoc d) {
         return sessions.computeIfAbsent(d.id, k -> new Runner.Session());
+    }
+
+    private static boolean bool(JsonObject in, String k) {
+        JsonElement e = in.get(k);
+        return e != null && !e.isJsonNull() && e.getAsBoolean();
     }
 
     private static String str(JsonObject in, String k) {
