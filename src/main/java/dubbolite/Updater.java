@@ -21,7 +21,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 /**
- * 检查更新：读取发布地址上的 latest.json，下载对应平台的安装包、校验 sha256、解压到 ~/.dubbo-lite/update，
+ * 检查更新：读取 GitHub Releases 上最新版本的 latest.json，下载对应平台的安装包、校验 sha256、解压到 ~/.dubbo-lite/update，
  * 然后启动一个安装脚本——等原生外壳退出后替换应用并重新打开（失败时恢复旧版本）。
  * <p>
  * latest.json 由 release.sh 生成：
@@ -32,7 +32,7 @@ import java.util.zip.ZipInputStream;
  */
 final class Updater {
 
-    static final String DEFAULT_URL = "https://github.com/yhk180/dubbo-lite/releases/latest/download/latest.json";
+    private static final String LATEST_URL = "https://github.com/yhk180/dubbo-lite/releases/latest/download/latest.json";
 
     private static final String OS = System.getProperty("os.name", "").toLowerCase();
     private static final boolean MAC = OS.contains("mac");
@@ -57,7 +57,7 @@ final class Updater {
     // ------------------------------------------------------------------ 接口
 
     synchronized JsonObject check() throws Exception {
-        JsonObject j = fetchJson(settings.updateUrl());
+        JsonObject j = fetchJson(LATEST_URL);
         String v = str(j, "version");
         if (v == null || v.isEmpty()) {
             throw new IllegalStateException("更新信息格式不正确：缺少 version");
@@ -280,7 +280,7 @@ final class Updater {
 
     private static HttpURLConnection connect(String url) throws IOException {
         if (!(url.startsWith("https://") || url.startsWith("http://"))) {
-            throw new IllegalArgumentException("更新地址必须是 http:// 或 https:// 开头：" + url);
+            throw new IllegalArgumentException("地址必须是 http:// 或 https:// 开头：" + url);
         }
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         c.setConnectTimeout(10_000);
@@ -298,10 +298,10 @@ final class Updater {
             c.setRequestProperty("Accept", "application/json");
             code = c.getResponseCode();
         } catch (IOException e) {
-            throw new IOException("无法连接更新服务器（" + e.getMessage() + "），请检查网络或设置中的更新地址", e);
+            throw new IOException("无法连接更新服务器（" + e.getMessage() + "），请检查网络", e);
         }
         if (code == 404) {
-            throw new IOException("更新地址上还没有发布任何版本（HTTP 404）：" + url);
+            throw new IOException("GitHub 上还没有发布任何版本（HTTP 404）：" + url);
         }
         if (code != 200) {
             throw new IOException("检查更新失败（HTTP " + code + "）：" + url);

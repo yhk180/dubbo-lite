@@ -26,8 +26,6 @@ final class Settings {
         List<String> extPaths = new ArrayList<>();
         /** 界面主题：system（跟随系统）/ light / dark */
         String theme = "system";
-        /** 检查更新的地址（latest.json）；为空时使用默认的 GitHub Releases 地址 */
-        String updateUrl;
         /** 启动时自动检查更新 */
         boolean autoUpdate = true;
         /** 用户选择跳过的版本：自动检查时不再提示 */
@@ -92,15 +90,6 @@ final class Settings {
 
     synchronized void setTheme(String theme) {
         data.theme = theme;
-        save();
-    }
-
-    synchronized String updateUrl() {
-        return data.updateUrl == null || data.updateUrl.trim().isEmpty() ? Updater.DEFAULT_URL : data.updateUrl.trim();
-    }
-
-    synchronized void setUpdateUrl(String url) {
-        data.updateUrl = url == null || url.trim().isEmpty() || url.trim().equals(Updater.DEFAULT_URL) ? null : url.trim();
         save();
     }
 

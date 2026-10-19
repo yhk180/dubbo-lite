@@ -40,7 +40,7 @@
 
 ## 发布与自动更新
 
-应用启动时（以及“更多 → 检查更新…”/ macOS 菜单“检查更新…”）读取 GitHub Releases 上最新版本的 `latest.json`，有新版本时顶栏出现“新版本”按钮；点“立即更新”会下载、校验 sha256，处理未保存的修改后关闭应用，替换为新版本并自动重新打开（失败时恢复旧版本，日志在 `~/.dubbo-lite/logs/update.log`）。更新地址可在“设置”中修改。
+应用启动时（以及“更多 → 检查更新…”/ macOS 菜单“检查更新…”）读取 GitHub Releases 上最新版本的 `latest.json`，有新版本时顶栏出现“新版本”按钮；点“立即更新”会下载、校验 sha256，处理未保存的修改后关闭应用，替换为新版本并自动重新打开（失败时恢复旧版本，日志在 `~/.dubbo-lite/logs/update.log`）。
 
 ```bash
 ./release.sh 1.1.0 "更新说明"              # 写入 VERSION 并构建，生成 dist/release/（mac/win 安装包 + latest.json），不上传

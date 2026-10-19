@@ -134,9 +134,6 @@ final class Api {
                 if (in.has("theme")) {
                     settings.setTheme(str(in, "theme"));
                 }
-                if (in.has("updateUrl")) {
-                    settings.setUpdateUrl(str(in, "updateUrl"));
-                }
                 if (in.has("autoUpdate")) {
                     settings.setAutoUpdate(bool(in, "autoUpdate"));
                 }
@@ -176,8 +173,6 @@ final class Api {
         o.addProperty("theme", settings.theme());
         o.addProperty("home", Settings.HOME.toString());
         o.addProperty("version", Main.VERSION);
-        o.addProperty("updateUrl", settings.updateUrl());
-        o.addProperty("defaultUpdateUrl", Updater.DEFAULT_URL);
         o.addProperty("autoUpdate", settings.autoUpdate());
         o.addProperty("java", System.getProperty("java.version"));
         JsonArray open = new JsonArray();

@@ -1060,8 +1060,6 @@ function sendButton(d, n) {
 async function showSettings() {
   S.state = await api('state');
   const ta = h('textarea', { class: 'input', rows: 4, placeholder: '/Users/me/JMeter/apache-jmeter-5.6.3/lib/ext' }, S.state.extPaths.join('\n'));
-  const urlIn = h('input', { class: 'input', spellcheck: 'false', placeholder: S.state.defaultUpdateUrl,
-    value: S.state.updateUrl === S.state.defaultUpdateUrl ? '' : S.state.updateUrl });
   let auto = S.state.autoUpdate !== false;
   const sw = h('label', { class: 'switch' + (auto ? ' on' : '') }, h('span', { class: 'tr' }), h('span', null, '启动时自动检查更新'));
   sw.addEventListener('click', () => { auto = !auto; sw.classList.toggle('on', auto); });
@@ -1073,10 +1071,6 @@ async function showSettings() {
         ta,
         h('div', { class: 'help' }, '前置/后置脚本里用到的第三方类（如公司工具包、groovy）放在这里。',
           h('br'), '也可以直接把 jar 放进 ', h('code', null, S.state.home + '/lib'))),
-      h('div', { class: 'field' },
-        h('label', null, '更新地址'),
-        urlIn,
-        h('div', { class: 'help' }, '新版本信息（latest.json）的地址，留空使用默认的 GitHub Releases。')),
       h('div', { class: 'upd-row' }, sw,
         h('button', { class: 'btn sm', onclick: () => checkUpdate(true) }, I('download', 's'), '检查更新')),
       h('div', { class: 'help', style: { marginTop: '14px' } }, `Dubbo Lite ${S.state.version} · Java ${S.state.java} · Dubbo 2.6.8`),
@@ -1086,7 +1080,6 @@ async function showSettings() {
   if (r == null) return;
   S.state = await api('settings', {
     extPaths: r.split('\n').map(s => s.trim()).filter(Boolean),
-    updateUrl: urlIn.value.trim(),
     autoUpdate: auto,
   });
   toast('设置已保存');
