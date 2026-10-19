@@ -294,8 +294,10 @@ final class Updater {
         HttpURLConnection c;
         int code;
         try {
-            c = connect(url);
+            // GitHub 会把 latest 的跳转缓存几分钟，加随机参数确保刚发布的版本立即可见
+            c = connect(url + (url.contains("?") ? "&" : "?") + "t=" + System.currentTimeMillis());
             c.setRequestProperty("Accept", "application/json");
+            c.setRequestProperty("Cache-Control", "no-cache");
             code = c.getResponseCode();
         } catch (IOException e) {
             throw new IOException("无法连接更新服务器（" + e.getMessage() + "），请检查网络", e);
