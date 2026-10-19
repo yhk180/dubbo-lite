@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 APP=dist/DubboLite.app
-VERSION=1.0.0
+VERSION=$(tr -d '[:space:]' < VERSION)
 rm -rf "$APP" build/shell
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/app" build/shell
 

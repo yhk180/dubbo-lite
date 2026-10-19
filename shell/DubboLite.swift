@@ -141,7 +141,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: home + "/bin/java")
-        p.arguments = ["-Xmx512m", "-Dapple.awt.UIElement=true", "-Dfile.encoding=UTF-8", "-jar", jar, "--shell"]
+        // shellPid：自动更新时，安装脚本等这个进程退出后再替换应用
+        p.arguments = ["-Xmx512m", "-Dapple.awt.UIElement=true", "-Dfile.encoding=UTF-8",
+                       "-Ddubbolite.shellPid=\(ProcessInfo.processInfo.processIdentifier)", "-jar", jar, "--shell"]
         let out = Pipe()
         p.standardOutput = out
         p.standardError = log ?? FileHandle.nullDevice
@@ -217,6 +219,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
             let t = body["theme"] as? String
             NSApp.appearance = t == "dark" ? NSAppearance(named: .darkAqua) : t == "light" ? NSAppearance(named: .aqua) : nil
             reply(id, nil)
+        case "quit":
+            // 页面已处理未保存的修改（如安装更新前），直接退出
+            closeConfirmed = true
+            NSApp.terminate(nil)
         default:
             reply(id, nil)
         }
@@ -279,6 +285,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "关于 Dubbo Lite", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
+        appMenu.addItem(item("检查更新…", "checkUpdate", ""))
         appMenu.addItem(item("设置…", "settings", ","))
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "隐藏 Dubbo Lite", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")

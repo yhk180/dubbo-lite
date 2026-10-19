@@ -78,6 +78,7 @@ const ICONS = {
   up: '<path d="m18 15-6-6-6 6"/>',
   down: '<path d="m6 9 6 6 6-6"/>',
   check: '<path d="m5 12.5 4.5 4.5L19 7"/>',
+  download: '<path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/>',
   eraser: '<path d="m7 21-4.3-4.3a1 1 0 0 1 0-1.4l10-10a1 1 0 0 1 1.4 0l5.6 5.6a1 1 0 0 1 0 1.4L13 21"/><path d="M22 21H7M5 11l9 9"/>',
 };
 function I(name, cls = '') {
@@ -748,6 +749,9 @@ function modal({ title, body, buttons }) {
   return new Promise(resolve => {
     const close = v => { mask.remove(); document.removeEventListener('keydown', onKey, true); resolve(v); };
     const onKey = e => {
+      // 叠加多个对话框时（如在设置里检查更新）只有最上面的响应按键
+      const masks = document.querySelectorAll('.mask');
+      if (masks[masks.length - 1] !== mask) return;
       if (e.key === 'Escape') { e.stopPropagation(); close(null); }
       if (e.key === 'Enter' && !(e.target instanceof HTMLTextAreaElement)) {
         const p = buttons.find(b => b.primary);
@@ -827,24 +831,27 @@ window.__requestClose = async () => {
   if (closing) return;
   closing = true;
   try {
-    await flush().catch(() => {});
-    const dirty = S.docs.filter(d => d.dirty);
-    if (dirty.length) {
-      const r = await modal({
-        title: '有未保存的修改',
-        body: dirty.map(d => '“' + d.name + '”').join('、') + ' 尚未保存，关闭后修改会丢失。',
-        buttons: [{ text: '取消', value: null }, { text: '不保存', value: 'discard', danger: true }, { text: '保存并关闭', value: 'save', primary: true }],
-      });
-      if (!r) return;
-      if (r === 'save') {
-        for (const d of dirty) if (!(await save(d))) return;
-      }
-    }
-    nativePost({ type: 'close' });
+    if (await settleDirty('关闭')) nativePost({ type: 'close' });
   } finally {
     closing = false;
   }
 };
+/** 有未保存的修改时询问保存 / 不保存 / 取消；返回是否继续（verb 如“关闭”“更新”） */
+async function settleDirty(verb) {
+  await flush().catch(() => {});
+  const dirty = S.docs.filter(d => d.dirty);
+  if (!dirty.length) return true;
+  const r = await modal({
+    title: '有未保存的修改',
+    body: dirty.map(d => '“' + d.name + '”').join('、') + ' 尚未保存，' + verb + '后修改会丢失。',
+    buttons: [{ text: '取消', value: null }, { text: '不保存', value: 'discard', danger: true }, { text: '保存并' + verb, value: 'save', primary: true }],
+  });
+  if (!r) return false;
+  if (r === 'save') {
+    for (const d of dirty) if (!(await save(d))) return false;
+  }
+  return true;
+}
 function nativeCall(msg) {
   return new Promise(res => {
     const id = ++nativeSeq;
@@ -1053,6 +1060,11 @@ function sendButton(d, n) {
 async function showSettings() {
   S.state = await api('state');
   const ta = h('textarea', { class: 'input', rows: 4, placeholder: '/Users/me/JMeter/apache-jmeter-5.6.3/lib/ext' }, S.state.extPaths.join('\n'));
+  const urlIn = h('input', { class: 'input', spellcheck: 'false', placeholder: S.state.defaultUpdateUrl,
+    value: S.state.updateUrl === S.state.defaultUpdateUrl ? '' : S.state.updateUrl });
+  let auto = S.state.autoUpdate !== false;
+  const sw = h('label', { class: 'switch' + (auto ? ' on' : '') }, h('span', { class: 'tr' }), h('span', null, '启动时自动检查更新'));
+  sw.addEventListener('click', () => { auto = !auto; sw.classList.toggle('on', auto); });
   const r = await modal({
     title: '设置',
     body: [
@@ -1061,13 +1073,114 @@ async function showSettings() {
         ta,
         h('div', { class: 'help' }, '前置/后置脚本里用到的第三方类（如公司工具包、groovy）放在这里。',
           h('br'), '也可以直接把 jar 放进 ', h('code', null, S.state.home + '/lib'))),
+      h('div', { class: 'field' },
+        h('label', null, '更新地址'),
+        urlIn,
+        h('div', { class: 'help' }, '新版本信息（latest.json）的地址，留空使用默认的 GitHub Releases。')),
+      h('div', { class: 'upd-row' }, sw,
+        h('button', { class: 'btn sm', onclick: () => checkUpdate(true) }, I('download', 's'), '检查更新')),
       h('div', { class: 'help', style: { marginTop: '14px' } }, `Dubbo Lite ${S.state.version} · Java ${S.state.java} · Dubbo 2.6.8`),
     ],
     buttons: [{ text: '取消', value: null }, { text: '保存', value: () => ta.value, primary: true }],
   });
   if (r == null) return;
-  S.state = await api('settings', { extPaths: r.split('\n').map(s => s.trim()).filter(Boolean) });
+  S.state = await api('settings', {
+    extPaths: r.split('\n').map(s => s.trim()).filter(Boolean),
+    updateUrl: urlIn.value.trim(),
+    autoUpdate: auto,
+  });
   toast('设置已保存');
+}
+
+/* ------------------------------------------------------------------ update */
+
+/** 检查到的新版本（顶栏显示“新版本”按钮） */
+let updateInfo = null;
+/** manual：用户主动检查，结果都要提示；自动检查时只在有新版本且没被跳过时在顶栏提示 */
+async function checkUpdate(manual) {
+  let r;
+  try {
+    r = await api('updateCheck');
+  } catch (e) {
+    if (manual) toast(e.message, true);
+    return;
+  }
+  updateInfo = r.newer ? r : null;
+  renderTop();
+  if (!manual) return;
+  if (r.newer) showUpdate();
+  else toast('已是最新版本（' + r.current + '）');
+}
+async function showUpdate() {
+  const u = updateInfo;
+  if (!u) return;
+  const r = await modal({
+    title: '发现新版本',
+    body: [
+      h('div', { class: 'upd-ver' }, '当前版本 ', h('b', null, u.current), h('span', { class: 'arrow' }, '→'), '最新版本 ', h('b', null, u.latest),
+        u.date ? h('span', { class: 'help' }, ' · ' + u.date) : null, u.size ? h('span', { class: 'help' }, ' · ' + fmtSize(u.size)) : null),
+      u.notes ? h('div', { class: 'upd-notes' }, u.notes) : null,
+      u.canInstall ? h('div', { class: 'help', style: { marginTop: '10px' } }, '更新时会关闭并自动重新打开 Dubbo Lite。')
+        : h('div', { class: 'note warn', style: { marginTop: '10px' } }, u.reason),
+    ],
+    buttons: [
+      { text: '跳过此版本', value: 'skip' },
+      { text: '稍后', value: null },
+      u.canInstall ? { text: '立即更新', value: 'install', primary: true } : { text: '前往下载', value: 'page', primary: true },
+    ],
+  });
+  try {
+    if (r === 'skip') {
+      await api('updateSkip', { version: u.latest });
+      u.skipped = true;
+      renderTop();
+      toast('已跳过 ' + u.latest + '，有更新的版本时会再提示');
+    } else if (r === 'page') {
+      await api('updatePage');
+    } else if (r === 'install') {
+      await installUpdate(u);
+    }
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+/** 下载 → 校验 → 处理未保存的修改 → 启动安装脚本 → 通知外壳退出（脚本替换后重新打开） */
+async function installUpdate(u) {
+  const fill = h('i');
+  const text = h('div', { class: 'help' }, '正在连接…');
+  const mask = h('div', { class: 'mask' }, h('div', { class: 'modal' },
+    h('div', { class: 'mh' }, '正在更新到 ' + u.latest),
+    h('div', { class: 'mb' }, h('div', { class: 'upd-bar' }, fill), text)));
+  document.body.append(mask);
+  try {
+    let s = await api('updateDownload');
+    while (s.phase === 'downloading') {
+      const pct = s.total > 0 ? Math.min(100, s.done * 100 / s.total) : 0;
+      fill.style.width = pct + '%';
+      text.textContent = '正在下载… ' + fmtSize(s.done) + (s.total > 0 ? ' / ' + fmtSize(s.total) : '');
+      await sleep(250);
+      s = await api('updateStatus');
+    }
+    if (s.phase !== 'ready') throw new Error(s.error || '下载失败');
+    fill.style.width = '100%';
+    text.textContent = '下载完成';
+  } catch (e) {
+    mask.remove();
+    toast('更新失败：' + e.message, true);
+    return;
+  }
+  mask.remove();
+  if (!(await settleDirty('更新'))) {
+    toast('新版本已下载，下次点“立即更新”即可安装');
+    return;
+  }
+  await api('updateInstall');
+  document.body.append(h('div', { class: 'mask' }, h('div', { class: 'modal' },
+    h('div', { class: 'mh' }, '正在安装 ' + u.latest),
+    h('div', { class: 'mb' }, 'Dubbo Lite 即将关闭，安装完成后会自动重新打开。'))));
+  await sleep(400);
+  nativePost({ type: 'quit' });
 }
 async function resetConnections() {
   const r = await api('reset');
@@ -1089,6 +1202,7 @@ const COMMANDS = {
   send: sendCurrent,
   newRequest,
   settings: showSettings,
+  checkUpdate: () => checkUpdate(true),
   find: () => { const i = document.querySelector('.search input'); if (i) { i.focus(); i.select(); } },
 };
 
@@ -1121,6 +1235,7 @@ function renderTop() {
     h('div', { class: 'brand' }, h('img', { src: 'icon.svg', alt: '' }), h('span', null, 'Dubbo Lite')),
     els.tabs,
     h('div', { class: 'actions' },
+      updateInfo && !updateInfo.skipped && h('button', { class: 'btn upd-pill', title: '有新版本可以安装', onclick: showUpdate }, I('download', 's'), '新版本 ' + updateInfo.latest),
       h('button', { class: 'btn ghost', title: '打开最近的文件，或从文件夹打开 (' + MOD + 'O)', onclick: e => openMenu(e.currentTarget) }, I('open', 's'), '打开', I('down', 'xs')),
       h('button', { class: 'btn ghost', title: '新建测试计划', onclick: newDoc }, I('plus', 's'), '新建'),
       els.saveBtn = h('button', { class: 'btn', title: '保存 (' + MOD + 'S)', onclick: () => save(doc()) }, I('save', 's'), '保存'),
@@ -1164,6 +1279,7 @@ function moreMenu(btn) {
     { label: '主题' },
     ...THEMES.map(([v, text]) => ({ text, icon: (S.state.theme || 'system') === v ? 'check' : null, run: () => setTheme(v) })),
     '-',
+    { text: '检查更新…', icon: 'download', run: () => checkUpdate(true) },
     { text: '设置…', icon: 'gear', run: showSettings },
   ]);
 }
@@ -2690,4 +2806,5 @@ addEventListener('drop', async e => {
     history.replaceState(null, '', '?t=' + TOKEN);
     await openPath(open);
   }
+  if (S.state.autoUpdate) setTimeout(() => checkUpdate(false), 3000);
 })();

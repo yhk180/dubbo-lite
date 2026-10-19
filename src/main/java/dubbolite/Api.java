@@ -34,12 +34,14 @@ final class Api {
     private final RegistrySniffer sniffer = new RegistrySniffer();
     private final Properties props = new Properties();
     private final Runner runner;
+    private final Updater updater;
     private final Map<String, JmxDoc> docs = new ConcurrentHashMap<>();
     private final Map<String, Runner.Session> sessions = new ConcurrentHashMap<>();
 
     Api(Settings settings) {
         this.settings = settings;
         this.runner = new Runner(client, props, settings::scriptLoader);
+        this.updater = new Updater(settings);
     }
 
     JsonElement handle(String action, JsonObject in) throws Exception {
@@ -132,6 +134,12 @@ final class Api {
                 if (in.has("theme")) {
                     settings.setTheme(str(in, "theme"));
                 }
+                if (in.has("updateUrl")) {
+                    settings.setUpdateUrl(str(in, "updateUrl"));
+                }
+                if (in.has("autoUpdate")) {
+                    settings.setAutoUpdate(bool(in, "autoUpdate"));
+                }
                 return state();
             }
             case "removeRecent":
@@ -146,6 +154,16 @@ final class Api {
                 }
                 return new JsonObject();
             }
+            case "updateCheck": return updater.check();
+            case "updateDownload": return updater.download();
+            case "updateStatus": return updater.status();
+            case "updateInstall": return updater.install();
+            case "updateSkip":
+                updater.skip(str(in, "version"));
+                return new JsonObject();
+            case "updatePage":
+                updater.openPage();
+                return new JsonObject();
             default:
                 throw new IllegalArgumentException("未知操作: " + action);
         }
@@ -158,6 +176,9 @@ final class Api {
         o.addProperty("theme", settings.theme());
         o.addProperty("home", Settings.HOME.toString());
         o.addProperty("version", Main.VERSION);
+        o.addProperty("updateUrl", settings.updateUrl());
+        o.addProperty("defaultUpdateUrl", Updater.DEFAULT_URL);
+        o.addProperty("autoUpdate", settings.autoUpdate());
         o.addProperty("java", System.getProperty("java.version"));
         JsonArray open = new JsonArray();
         for (JmxDoc d : docs.values()) {

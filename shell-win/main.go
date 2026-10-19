@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -143,7 +144,8 @@ func (a *app) startBackend(java, jar, openFile string) {
 	_ = os.MkdirAll(logDir, 0o755)
 	logFile, _ := os.Create(filepath.Join(logDir, "backend.log"))
 
-	cmd := exec.Command(java, "-Xmx512m", "-Dfile.encoding=UTF-8", "-jar", jar, "--shell")
+	// shellPid：自动更新时，安装脚本等这个进程退出后再替换程序文件
+	cmd := exec.Command(java, "-Xmx512m", "-Dfile.encoding=UTF-8", "-Ddubbolite.shellPid="+strconv.Itoa(os.Getpid()), "-jar", jar, "--shell")
 	cmd.Dir = a.exeDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 	if logFile != nil {
@@ -295,7 +297,7 @@ func (a *app) native(raw string) {
 		case a.closeAck <- struct{}{}:
 		default:
 		}
-	case "close":
+	case "close", "quit": // quit：页面已处理未保存的修改（如安装更新前），直接退出
 		a.allowClose.Store(true)
 		_, _, _ = procPostMessage.Call(a.hwnd, wmClose, 0, 0)
 	case "reveal":

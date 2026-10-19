@@ -36,13 +36,25 @@
 ./build.sh all    # 全部
 ```
 
-依赖都在 `lib/`（取自本机 JMeter 与 Maven 仓库），离线即可构建。
+依赖都在 `lib/`（取自本机 JMeter 与 Maven 仓库），离线即可构建。版本号在根目录的 `VERSION` 文件中。
+
+## 发布与自动更新
+
+应用启动时（以及“更多 → 检查更新…”/ macOS 菜单“检查更新…”）读取 GitHub Releases 上最新版本的 `latest.json`，有新版本时顶栏出现“新版本”按钮；点“立即更新”会下载、校验 sha256，处理未保存的修改后关闭应用，替换为新版本并自动重新打开（失败时恢复旧版本，日志在 `~/.dubbo-lite/logs/update.log`）。更新地址可在“设置”中修改。
+
+```bash
+./release.sh 1.1.0 "更新说明"              # 写入 VERSION 并构建，生成 dist/release/（mac/win 安装包 + latest.json），不上传
+./release.sh 1.1.0 notes.md --publish      # 同上，再提交 VERSION、push，用 gh 创建 Release v1.1.0 并上传
+```
+
+`--publish` 需要 [GitHub CLI](https://cli.github.com)（`brew install gh && gh auth login`）。只有从 DubboLite.app / DubboLite.exe 启动时才能自动安装；macOS 上需要先把应用拖到“应用程序”等可写位置（直接从“下载”里打开会被系统隔离到只读位置）。
 
 ## 结构
 
 ```
 src/main/java/dubbolite/
   Main.java            本机 HTTP 服务(127.0.0.1 + 随机令牌) / 窗口启动 / 单实例
+  Updater.java         检查更新、下载校验、安装脚本（等外壳退出后替换并重新打开）
   Api.java             前端接口
   jmx/Xml.java         保真 XML 解析与写回（与 JMeter/XStream 相同的转义）
   jmx/JmxDoc.java      测试元素树、增删改移、Dubbo 字段映射

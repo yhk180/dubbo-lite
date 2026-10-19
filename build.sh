@@ -18,6 +18,7 @@ mkdir -p build/classes dist/dubbo-lite/lib
 echo "▸ 编译 Java ($JAVAC)"
 "$JAVAC" -encoding UTF-8 -source 8 -target 8 -Xlint:-options -nowarn -cp "lib/*" -d build/classes $(find src/main/java -name '*.java')
 cp -R src/main/resources/. build/classes/
+tr -d '[:space:]' < VERSION > build/classes/version.txt
 
 echo "▸ 打包 jar"
 CLASS_PATH=$(cd lib && ls *.jar | sed 's#^#lib/#' | tr '\n' ' ')
@@ -53,4 +54,4 @@ if [[ "${1:-}" == "win" || "${1:-}" == "all" ]]; then
   echo "▸ 构建 Windows 版"
   ./shell-win/build.sh
 fi
-echo "✓ 完成：$(du -sh dist/dubbo-lite | cut -f1)  dist/dubbo-lite/"
+echo "✓ 完成 $(cat build/classes/version.txt)：$(du -sh dist/dubbo-lite | cut -f1)  dist/dubbo-lite/"

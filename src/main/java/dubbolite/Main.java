@@ -34,7 +34,8 @@ import java.util.logging.Logger;
  */
 public final class Main {
 
-    static final String VERSION = "1.0.0";
+    /** 版本号：构建时由项目根目录的 VERSION 文件写入 /version.txt；开发时为 dev */
+    static final String VERSION = readVersion();
     private static final int DEFAULT_PORT = 17788;
 
     private final String token = randomToken();
@@ -363,6 +364,14 @@ public final class Main {
             new ProcessBuilder("xdg-open", url).start();
         } catch (Exception e) {
             System.out.println("请在浏览器中打开: " + url);
+        }
+    }
+
+    private static String readVersion() {
+        try (InputStream in = Main.class.getResourceAsStream("/version.txt")) {
+            return in == null ? "dev" : new String(Api.readBytes(in), StandardCharsets.UTF_8).trim();
+        } catch (IOException e) {
+            return "dev";
         }
     }
 
