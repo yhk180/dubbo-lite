@@ -537,28 +537,39 @@ function editorKeys(e, ta) {
     } else insertText(ta, '\n' + ind + extra);
   }
 }
-/** 点分名称（如 com.zto.voice.dto.DistributeCmd）：双击只选中其中一段，三击选中整个名称；不含 . 的内容保持默认行为 */
+/**
+ * 点分名称（如 com.zto.voice.dto.DistributeCmd）：双击只选中其中一段，三击选中整个名称；不含 . 的内容保持默认行为。
+ * 在 mousedown 时直接设定选区并阻止默认选择，避免先闪一下整段再切换
+ */
 function dottedSelect(el) {
   const W = /[\w$]/, N = /[\w$.]/;
   let caret = -1;
-  el.addEventListener('click', e => {
-    if (e.detail === 1) { caret = el.selectionStart; return; }
-    if (e.detail > 3 || caret < 0) return;
+  /** 第 clicks 次点击应选中的范围；不适用时返回 null */
+  const range = clicks => {
     const v = el.value;
     const i = W.test(v[caret] || '') ? caret : W.test(v[caret - 1] || '') ? caret - 1 : -1;
-    if (i < 0) return;
+    if (i < 0) return null;
     let a = i, b = i + 1;
     while (a > 0 && N.test(v[a - 1])) a--;
     while (b < v.length && N.test(v[b])) b++;
     while (v[a] === '.') a++;
     while (b > a && v[b - 1] === '.') b--;
-    if (!v.slice(a, b).includes('.')) return;
-    if (e.detail === 3) return el.setSelectionRange(a, b);
+    if (!v.slice(a, b).includes('.')) return null;
+    if (clicks === 3) return [a, b];
     let x = i, y = i + 1;
     while (x > 0 && W.test(v[x - 1])) x--;
     while (y < v.length && W.test(v[y])) y++;
-    el.setSelectionRange(x, y);
+    return [x, y];
+  };
+  el.addEventListener('mousedown', e => {
+    if (e.button !== 0 || (e.detail !== 2 && e.detail !== 3) || caret < 0) return;
+    const r = range(e.detail);
+    if (!r) return;
+    e.preventDefault();
+    el.focus();
+    el.setSelectionRange(r[0], r[1]);
   });
+  el.addEventListener('click', e => { if (e.detail === 1) caret = el.selectionStart; });
 }
 const measureCtx = document.createElement('canvas').getContext('2d');
 function codeEditor({ value = '', lang = 'json', onChange, readOnly, hint, tools }) {
@@ -699,12 +710,20 @@ function toast(msg, isErr) {
   setTimeout(() => t.remove(), isErr ? 5200 : 2200);
 }
 let menuEl = null;
+/** 叠加在菜单之上的右键菜单（如“打开”菜单中最近文件的右键），关闭它不影响下面的菜单 */
+let subMenuEl = null;
+function closeSubMenu() {
+  if (subMenuEl) { subMenuEl.remove(); subMenuEl = null; }
+}
 function closeMenu() {
+  closeSubMenu();
   if (menuEl) { menuEl.remove(); menuEl = null; }
 }
-function showMenu(x, y, items) {
-  closeMenu();
-  const m = h('div', { class: 'menu' });
+/** sub 为 true 时作为叠加的右键菜单显示，保留已打开的菜单 */
+function showMenu(x, y, items, sub) {
+  if (sub) closeSubMenu();
+  else closeMenu();
+  const m = h('div', { class: 'menu' + (sub ? ' sub' : '') });
   for (const it of items) {
     if (!it) continue;
     if (it === '-') m.append(h('div', { class: 'hr' }));
@@ -713,7 +732,7 @@ function showMenu(x, y, items) {
       m.append(h('div', {
         class: 'mi' + (it.danger ? ' danger' : ''),
         title: it.title || null,
-        onclick: () => { closeMenu(); it.run(); },
+        onclick: () => { if (sub) closeSubMenu(); else closeMenu(); it.run(); },
         oncontextmenu: it.context ? e => { e.preventDefault(); it.context(e); } : null,
       }, it.icon ? I(it.icon, 's') : h('span', { style: { width: '14px' } }), it.text, it.key ? h('span', { class: 'k' }, it.key) : null));
     }
@@ -722,7 +741,8 @@ function showMenu(x, y, items) {
   const r = m.getBoundingClientRect();
   m.style.left = Math.min(x, innerWidth - r.width - 8) + 'px';
   m.style.top = Math.min(y, innerHeight - r.height - 8) + 'px';
-  menuEl = m;
+  if (sub) subMenuEl = m;
+  else menuEl = m;
 }
 function modal({ title, body, buttons }) {
   return new Promise(resolve => {
@@ -1148,7 +1168,9 @@ function moreMenu(btn) {
   ]);
 }
 /** “打开”菜单：最近打开的文件 + 从文件夹打开 */
+let openMenuBtn = null;
 function openMenu(btn) {
+  openMenuBtn = btn;
   const r = btn.getBoundingClientRect();
   const recent = (S.state.recent || []).slice(0, 10);
   const home = (S.state.home || '').replace(/[\\/]\.dubbo-lite$/, '');
@@ -1159,14 +1181,20 @@ function openMenu(btn) {
   };
   showMenu(r.left, r.bottom + 6, [
     recent.length && { label: '最近打开' },
-    ...recent.map(p => ({ text: baseName(p), icon: 'file', key: where(p), title: p + '\n右键可从列表移除', run: () => openPath(p), context: e => recentMenu(e, p) })),
+    ...recent.map(p => ({ text: baseName(p), icon: 'file', key: where(p), title: p + '\n右键可从列表移除', run: () => openPath(p), context: e => recentMenu(e, p, true) })),
     recent.length && '-',
     { text: '从文件夹打开…', icon: 'folder', key: MOD + 'O', run: openDialog },
   ]);
 }
-/** 最近打开的右键菜单 */
-function recentMenu(e, p) {
-  showMenu(e.clientX, e.clientY, [{ text: '从最近打开中移除', icon: 'x', run: () => forgetRecent(p) }]);
+/** 最近打开的右键菜单；inMenu 表示来自“打开”菜单：叠加显示，移除后原地刷新该菜单 */
+function recentMenu(e, p, inMenu) {
+  showMenu(e.clientX, e.clientY, [{
+    text: '从最近打开中移除', icon: 'x',
+    run: async () => {
+      await forgetRecent(p);
+      if (inMenu && menuEl && openMenuBtn) openMenu(openMenuBtn);
+    },
+  }], inMenu);
 }
 async function forgetRecent(p) {
   try {
@@ -2594,8 +2622,9 @@ function viewOther(d, n, c) {
 document.addEventListener('keydown', e => {
   const mod = IS_MAC ? e.metaKey : e.ctrlKey;
   if (e.key === 'Escape') {
-    const hadMenu = !!menuEl;
-    closeMenu();
+    const hadMenu = !!menuEl || !!subMenuEl;
+    if (subMenuEl) closeSubMenu();
+    else closeMenu();
     // Esc 中断当前请求（不抢搜索框的 Esc）
     if (!hadMenu && !(e.target.closest && e.target.closest('.search')) && cancelCurrent()) e.preventDefault();
   }
@@ -2606,7 +2635,11 @@ document.addEventListener('keydown', e => {
   else if (k === 'enter') { e.preventDefault(); sendCurrent(); }
   else if (k === 'k' || k === 'p') { e.preventDefault(); COMMANDS.find(); }
 });
-document.addEventListener('mousedown', e => { if (menuEl && !menuEl.contains(e.target)) closeMenu(); });
+document.addEventListener('mousedown', e => {
+  if (subMenuEl && subMenuEl.contains(e.target)) return;
+  closeSubMenu();
+  if (menuEl && !menuEl.contains(e.target)) closeMenu();
+});
 addEventListener('blur', closeMenu);
 addEventListener('beforeunload', e => {
   if (!NATIVE && window.__hasDirty()) { e.preventDefault(); e.returnValue = ''; }
