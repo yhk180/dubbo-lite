@@ -197,8 +197,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
     // MARK: - bridge
 
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let body = message.body as? [String: Any], let type = body["type"] as? String,
-              let id = body["id"] as? Int else { return }
+        guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
+        if type == "quit" {
+            // 页面已处理未保存的修改（如安装更新前），直接退出；不需要回复
+            closeConfirmed = true
+            NSApp.terminate(nil)
+            return
+        }
+        guard let id = body["id"] as? Int else { return }
         let dir = (body["dir"] as? String) ?? ""
         switch type {
         case "pickOpen":
@@ -219,10 +225,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKSc
             let t = body["theme"] as? String
             NSApp.appearance = t == "dark" ? NSAppearance(named: .darkAqua) : t == "light" ? NSAppearance(named: .aqua) : nil
             reply(id, nil)
-        case "quit":
-            // 页面已处理未保存的修改（如安装更新前），直接退出
-            closeConfirmed = true
-            NSApp.terminate(nil)
         default:
             reply(id, nil)
         }

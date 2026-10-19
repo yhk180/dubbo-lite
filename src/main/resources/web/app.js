@@ -1169,11 +1169,14 @@ async function installUpdate(u) {
     return;
   }
   await api('updateInstall');
+  const msg = h('div', { class: 'mb' }, 'Dubbo Lite 即将关闭，安装完成后会自动重新打开。');
   document.body.append(h('div', { class: 'mask' }, h('div', { class: 'modal' },
-    h('div', { class: 'mh' }, '正在安装 ' + u.latest),
-    h('div', { class: 'mb' }, 'Dubbo Lite 即将关闭，安装完成后会自动重新打开。'))));
+    h('div', { class: 'mh' }, '正在安装 ' + u.latest), msg)));
   await sleep(400);
   nativePost({ type: 'quit' });
+  // 外壳没能自动退出时，请用户手动退出；安装脚本会等待 10 分钟
+  await sleep(5000);
+  msg.textContent = 'Dubbo Lite 没有自动关闭，请手动退出（' + (IS_MAC ? '⌘Q' : '关闭窗口') + '），退出后会自动完成安装并重新打开。';
 }
 async function resetConnections() {
   const r = await api('reset');

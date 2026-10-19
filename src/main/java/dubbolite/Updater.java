@@ -133,7 +133,9 @@ final class Updater {
         if (MAC) {
             Path script = DIR.resolve("install.sh");
             Files.write(script, MAC_SCRIPT.getBytes(StandardCharsets.UTF_8));
-            pb = new ProcessBuilder("/bin/bash", script.toString(), target.toString(), staged.toString(), pid);
+            // 外壳退出时会给后台进程所在的进程组发信号；set -m 让安装脚本在单独的进程组中运行，不被一起结束
+            pb = new ProcessBuilder("/bin/bash", "-c", "set -m; /bin/bash \"$@\" &", "install",
+                    script.toString(), target.toString(), staged.toString(), pid);
         } else {
             Path script = DIR.resolve("install.ps1");
             byte[] body = WIN_SCRIPT.replace("\n", "\r\n").getBytes(StandardCharsets.UTF_8);
@@ -412,9 +414,10 @@ final class Updater {
     private static final String MAC_SCRIPT = String.join("\n",
             "#!/bin/bash",
             "# Dubbo Lite 自动更新：等应用退出后替换并重新打开；失败时恢复旧版本",
+            "trap '' HUP TERM",
             "APP=\"$1\"; NEW=\"$2\"; PID=\"$3\"",
             "echo \"$(date '+%F %T') 更新 $APP\"",
-            "for _ in $(seq 1 300); do kill -0 \"$PID\" 2>/dev/null || break; sleep 0.2; done",
+            "for _ in $(seq 1 3000); do kill -0 \"$PID\" 2>/dev/null || break; sleep 0.2; done",
             "if kill -0 \"$PID\" 2>/dev/null; then echo '应用没有退出，放弃更新'; exit 1; fi",
             "sleep 0.5",
             "OLD=\"$(dirname \"$APP\")/.$(basename \"$APP\").old\"",
@@ -435,7 +438,7 @@ final class Updater {
     private static final String WIN_SCRIPT = String.join("\n",
             "param([string]$Dir, [string]$New, [int]$ShellPid)",
             "\"$(Get-Date -Format s) update $Dir\"",
-            "try { Wait-Process -Id $ShellPid -Timeout 60 -ErrorAction SilentlyContinue } catch {}",
+            "try { Wait-Process -Id $ShellPid -Timeout 600 -ErrorAction SilentlyContinue } catch {}",
             "if (Get-Process -Id $ShellPid -ErrorAction SilentlyContinue) { 'app is still running, abort'; exit 1 }",
             "Start-Sleep -Milliseconds 800",
             "$ErrorActionPreference = 'Stop'",
