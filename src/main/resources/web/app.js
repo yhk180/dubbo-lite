@@ -1713,9 +1713,9 @@ function viewRequest(d, n, c) {
   if (f.appidKey) chips.push(chip('签名', f.appidKey.split(',')[0], 'appidKey'));
   if (f.version) chips.push(chip('版本', f.version, 'version'));
   if (f.group) chips.push(chip('分组', f.group, 'group'));
-  const nCtx = (n.props.rpcContext || []).length;
+  const nCtx = ctxCount(d, n);
   chips.push(els.ctxChip = h('span', { class: 'chip', onclick: () => { S.reqTab = 'ctx'; renderContent(); } }, 'RPCContext', h('b')));
-  ctxChipSync(n);
+  ctxChipSync(d, n);
   const scope = scopeOf(d, n);
   const scripts = scope.filter(x => x.kind === 'pre' || x.kind === 'post');
   const csvs = scope.filter(x => x.kind === 'csv');
@@ -2363,20 +2363,47 @@ function connForm(d, n, from) {
     : null;
   return h('div', { class: 'form' }, note, grid);
 }
+/**
+ * 从生效的前置脚本中静态找出 setAttachment(名称, 值) / getAttachments().put(名称, 值)：[{ name, value, src }]。
+ * 只识别字面量名称；同名时后执行的脚本为准；从外部文件加载的脚本不解析
+ */
+function scriptAttachments(d, n) {
+  const m = new Map();
+  const unquote = t => /^(["'])[\s\S]*\1$/.test(t) ? t.slice(1, -1).replace(/\\(.)/g, '$1') : t;
+  for (const x of scopeOf(d, n)) {
+    if (x.kind !== 'pre') continue;
+    const code = (x.props.script || '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:"'\\])\/\/.*$/gm, '$1');
+    const re = /(?:setAttachment|getAttachments\(\)\s*\.\s*put)\s*\(\s*("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')\s*,\s*([^;\n]*?)\s*\)\s*(?:;|$)/gm;
+    let r;
+    while ((r = re.exec(code))) {
+      const name = unquote(r[1]);
+      if (!name.trim()) continue;
+      m.delete(name);
+      m.set(name, { name, value: unquote(r[2].trim()), src: x });
+    }
+  }
+  return [...m.values()];
+}
+/** 生效的附件数：请求上配置的 + 前置脚本中设置的（同名只算一次） */
+function ctxCount(d, n) {
+  const names = new Set((n.props.rpcContext || []).map(r => r.name.trim()));
+  scriptAttachments(d, n).forEach(r => names.add(r.name));
+  names.delete('');
+  return names.size;
+}
 /** 顶部 RPCContext chip：没有附件时隐藏 */
-function ctxChipSync(n) {
+function ctxChipSync(d, n) {
   const chip = els.ctxChip;
   if (!chip) return;
-  const rows = n.props.rpcContext || [];
-  chip.style.display = rows.length ? '' : 'none';
-  chip.title = rows.map(r => r.name).join(', ');
-  chip.querySelector('b').textContent = rows.length + ' 个附件';
+  const cnt = ctxCount(d, n);
+  chip.style.display = cnt ? '' : 'none';
+  chip.querySelector('b').textContent = cnt + ' 个附件';
 }
 function rpcContextForm(d, n) {
   // 条数变化时只刷新页签角标和顶部 chip，不重绘表格（避免输入框失去焦点）
   const onCommit = () => {
-    const cnt = (n.props.rpcContext || []).length;
-    ctxChipSync(n);
+    const cnt = ctxCount(d, n);
+    ctxChipSync(d, n);
     const tab = document.querySelector('.subtab.on');
     if (!tab) return;
     let b = tab.querySelector('.n');
@@ -2384,12 +2411,12 @@ function rpcContextForm(d, n) {
     if (!b) tab.append(b = h('span', { class: 'n' }));
     b.textContent = cnt;
   };
+  const locked = scriptAttachments(d, n).map(r => ({
+    name: r.name, value: r.value, src: '来自 ' + r.src.name, srcTitle: '在前置脚本“' + r.src.name + '”中设置，发送时以脚本为准；点击查看脚本',
+    onSrc: () => select(r.src.id),
+  }));
   return h('div', { class: 'form' },
-    h('div', { class: 'note', style: { marginBottom: '16px' } },
-      '发送前写入 ', h('code', null, 'RpcContext.getContext().setAttachment(名称, 值)'), '，随调用传给提供者（如 traceId、租户、灰度标记）。',
-      '名称和值都可以使用 ', h('code', null, '${变量}'), ' 和函数，在前置脚本之后替换，可引用脚本产生的变量；前置脚本中已设置的同名附件优先。',
-      '这是本工具扩展的配置，保存在 .jmx 中 JMeter 可正常打开，但 JMeter 插件不会发送它，需要时请用前置脚本设置。'),
-    kvTable(d, n, 'rpcContext', { name: '附件名，如 traceId', value: '值，如 ${__UUID()}', add: '添加附件' }, onCommit));
+    kvTable(d, n, 'rpcContext', { name: '附件名，如 traceId', value: '值，如 ${__UUID()}', add: '新增' }, { onCommit, minOne: true, locked }));
 }
 function scopeView(d, n) {
   const all = scopeOf(d, n, true).filter(x => x.kind !== 'defaults');
@@ -2622,13 +2649,25 @@ function varsTable(d, n) {
   return kvTable(d, n, 'variables', { name: '变量名', value: '值，可使用函数如 ${__time(yyyyMMdd,)}', add: '添加变量' });
 }
 /** 名称/值表格，编辑后整体写回 n.props[key]（空名称的行不保存） */
-function kvTable(d, n, key, text, onCommit) {
+/**
+ * 名称/值表格，编辑后整体写回 n.props[key]（空名称的行不保存）。
+ * opts.minOne：至少保留一行空行；opts.locked：只读行 [{ name, value, src, srcTitle, onSrc }]，显示在最前面
+ */
+function kvTable(d, n, key, text, opts = {}) {
   const rows = (n.props[key] || []).map(v => ({ ...v }));
+  const locked = opts.locked || [];
+  const lockedNames = new Set(locked.map(r => r.name));
   const tbody = h('tbody');
-  const commit = () => { queue(d, n, { props: { [key]: rows.filter(r => r.name.trim()) } }); if (onCommit) onCommit(); };
+  const commit = () => { queue(d, n, { props: { [key]: rows.filter(r => r.name.trim()) } }); if (opts.onCommit) opts.onCommit(); };
   const draw = () => {
     tbody.innerHTML = '';
-    rows.forEach((r, i) => tbody.append(h('tr', null,
+    if (opts.minOne && !rows.length) rows.push({ name: '', value: '' });
+    locked.forEach(r => tbody.append(h('tr', { class: 'ro' },
+      h('td', null, h('div', { class: 'input' }, h('span', { class: 'v' }, r.name),
+        h('a', { class: 'src', title: r.srcTitle, onclick: r.onSrc }, I('braces', 'xs'), r.src))),
+      h('td', null, h('div', { class: 'input', title: r.value }, h('span', { class: 'v' }, r.value))),
+      h('td'))));
+    rows.forEach((r, i) => tbody.append(h('tr', { title: lockedNames.has(r.name.trim()) ? '前置脚本中设置了同名附件，发送时以脚本为准' : null },
       h('td', null, h('input', { class: 'input', value: r.name, placeholder: text.name, spellcheck: 'false', oninput: e => { r.name = e.target.value; commit(); } })),
       h('td', null, h('input', { class: 'input', value: r.value, placeholder: text.value, spellcheck: 'false', oninput: e => { r.value = e.target.value; commit(); } })),
       h('td', null, h('button', { class: 'btn ghost sm icon', title: '删除', onclick: () => { rows.splice(i, 1); commit(); draw(); } }, I('x', 'xs'))))));

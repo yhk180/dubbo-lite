@@ -399,6 +399,10 @@ textarea.input { height: auto; padding: 8px 10px; resize: vertical; line-height:
 .kv th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 0 6px 6px; }
 .kv td { padding: 3px 4px; }
 .kv td:last-child { width: 36px; }
+.kv tr.ro .input { display: flex; align-items: center; gap: 8px; background: var(--hover); color: var(--muted); border-color: transparent; cursor: default; }
+.kv tr.ro .v { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kv tr.ro .src { flex: none; display: flex; align-items: center; gap: 4px; max-width: 55%; font: 11.5px var(--ui); color: var(--faint); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kv tr.ro .src:hover { color: var(--accent); }
 .list { max-width: 980px; display: flex; flex-direction: column; gap: 6px; }
 .item {
   display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px;
