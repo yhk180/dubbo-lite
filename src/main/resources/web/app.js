@@ -1713,6 +1713,9 @@ function viewRequest(d, n, c) {
   if (f.appidKey) chips.push(chip('签名', f.appidKey.split(',')[0], 'appidKey'));
   if (f.version) chips.push(chip('版本', f.version, 'version'));
   if (f.group) chips.push(chip('分组', f.group, 'group'));
+  const nCtx = (n.props.rpcContext || []).length;
+  chips.push(els.ctxChip = h('span', { class: 'chip', onclick: () => { S.reqTab = 'ctx'; renderContent(); } }, 'RPCContext', h('b')));
+  ctxChipSync(n);
   const scope = scopeOf(d, n);
   const scripts = scope.filter(x => x.kind === 'pre' || x.kind === 'post');
   const csvs = scope.filter(x => x.kind === 'csv');
@@ -1730,7 +1733,7 @@ function viewRequest(d, n, c) {
 
   const tab = S.reqTab;
   const fmtBtn = h('button', { class: 'btn ghost sm', title: '格式化 JSON（大数字与 ${变量} 原样保留）', onclick: () => formatParams() }, I('wand', 's'), '格式化');
-  const tabs = subtabs([['params', '参数'], ['conn', '连接'], ['scope', '脚本与数据', scope.filter(x => x.kind !== 'defaults').length || null]],
+  const tabs = subtabs([['params', '参数'], ['conn', '连接'], ['ctx', 'RPCContext', nCtx || null], ['scope', '脚本与数据', scope.filter(x => x.kind !== 'defaults').length || null]],
     tab, k => { S.reqTab = k; renderContent(); }, tab === 'params' ? fmtBtn : null);
   const body = h('div', { class: 'req-body' });
   let editor = null;
@@ -1743,6 +1746,8 @@ function viewRequest(d, n, c) {
     body.append(editor);
   } else if (tab === 'conn') {
     body.append(connForm(d, n, from));
+  } else if (tab === 'ctx') {
+    body.append(rpcContextForm(d, n));
   } else {
     body.append(scopeView(d, n));
   }
@@ -2358,6 +2363,34 @@ function connForm(d, n, from) {
     : null;
   return h('div', { class: 'form' }, note, grid);
 }
+/** 顶部 RPCContext chip：没有附件时隐藏 */
+function ctxChipSync(n) {
+  const chip = els.ctxChip;
+  if (!chip) return;
+  const rows = n.props.rpcContext || [];
+  chip.style.display = rows.length ? '' : 'none';
+  chip.title = rows.map(r => r.name).join(', ');
+  chip.querySelector('b').textContent = rows.length + ' 个附件';
+}
+function rpcContextForm(d, n) {
+  // 条数变化时只刷新页签角标和顶部 chip，不重绘表格（避免输入框失去焦点）
+  const onCommit = () => {
+    const cnt = (n.props.rpcContext || []).length;
+    ctxChipSync(n);
+    const tab = document.querySelector('.subtab.on');
+    if (!tab) return;
+    let b = tab.querySelector('.n');
+    if (!cnt) { if (b) b.remove(); return; }
+    if (!b) tab.append(b = h('span', { class: 'n' }));
+    b.textContent = cnt;
+  };
+  return h('div', { class: 'form' },
+    h('div', { class: 'note', style: { marginBottom: '16px' } },
+      '发送前写入 ', h('code', null, 'RpcContext.getContext().setAttachment(名称, 值)'), '，随调用传给提供者（如 traceId、租户、灰度标记）。',
+      '名称和值都可以使用 ', h('code', null, '${变量}'), ' 和函数，在前置脚本之后替换，可引用脚本产生的变量；前置脚本中已设置的同名附件优先。',
+      '这是本工具扩展的配置，保存在 .jmx 中 JMeter 可正常打开，但 JMeter 插件不会发送它，需要时请用前置脚本设置。'),
+    kvTable(d, n, 'rpcContext', { name: '附件名，如 traceId', value: '值，如 ${__UUID()}', add: '添加附件' }, onCommit));
+}
 function scopeView(d, n) {
   const all = scopeOf(d, n, true).filter(x => x.kind !== 'defaults');
   const wrap = h('div', { class: 'form' });
@@ -2586,20 +2619,24 @@ function viewCsv(d, n, c) {
           toggle('ignoreFirstLine', '忽略首行', false), toggle('quotedData', '允许带引号的数据', false), toggle('recycle', '读到末尾后循环', true)))));
 }
 function varsTable(d, n) {
-  const rows = (n.props.variables || []).map(v => ({ ...v }));
+  return kvTable(d, n, 'variables', { name: '变量名', value: '值，可使用函数如 ${__time(yyyyMMdd,)}', add: '添加变量' });
+}
+/** 名称/值表格，编辑后整体写回 n.props[key]（空名称的行不保存） */
+function kvTable(d, n, key, text, onCommit) {
+  const rows = (n.props[key] || []).map(v => ({ ...v }));
   const tbody = h('tbody');
-  const commit = () => queue(d, n, { props: { variables: rows.filter(r => r.name.trim()) } });
+  const commit = () => { queue(d, n, { props: { [key]: rows.filter(r => r.name.trim()) } }); if (onCommit) onCommit(); };
   const draw = () => {
     tbody.innerHTML = '';
     rows.forEach((r, i) => tbody.append(h('tr', null,
-      h('td', null, h('input', { class: 'input', value: r.name, placeholder: '变量名', oninput: e => { r.name = e.target.value; commit(); } })),
-      h('td', null, h('input', { class: 'input', value: r.value, placeholder: '值，可使用函数如 ${__time(yyyyMMdd,)}', oninput: e => { r.value = e.target.value; commit(); } })),
+      h('td', null, h('input', { class: 'input', value: r.name, placeholder: text.name, spellcheck: 'false', oninput: e => { r.name = e.target.value; commit(); } })),
+      h('td', null, h('input', { class: 'input', value: r.value, placeholder: text.value, spellcheck: 'false', oninput: e => { r.value = e.target.value; commit(); } })),
       h('td', null, h('button', { class: 'btn ghost sm icon', title: '删除', onclick: () => { rows.splice(i, 1); commit(); draw(); } }, I('x', 'xs'))))));
   };
   draw();
   return h('div', null,
     h('table', { class: 'kv' }, h('thead', null, h('tr', null, h('th', null, '名称'), h('th', null, '值'), h('th'))), tbody),
-    h('button', { class: 'btn sm', style: { marginTop: '8px' }, onclick: () => { rows.push({ name: '', value: '' }); draw(); tbody.querySelector('tr:last-child input').focus(); } }, I('plus', 'xs'), '添加变量'));
+    h('button', { class: 'btn sm', style: { marginTop: '8px' }, onclick: () => { rows.push({ name: '', value: '' }); draw(); tbody.querySelector('tr:last-child input').focus(); } }, I('plus', 'xs'), text.add));
 }
 function viewVars(d, n, c) {
   c.append(h('div', { class: 'req' }, titleLine(d, n), crumb(d, n)),

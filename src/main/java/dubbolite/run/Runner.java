@@ -299,6 +299,14 @@ public final class Runner {
         for (Map.Entry<String, String> e : mapping.entrySet()) {
             fields.put(e.getKey(), rawProps.get(e.getValue()));
         }
+        // 请求上配置的 RPCContext 附件：在前置脚本之后替换变量（可引用脚本产生的变量），脚本已设置的同名附件优先
+        RpcContext rpc = RpcContext.getContext();
+        for (String[] kv : JmxDoc.rpcContext(s)) {
+            String k = fn.apply(kv[0]).trim();
+            if (!k.isEmpty() && rpc.getAttachment(k) == null) {
+                rpc.setAttachment(k, fn.apply(kv[1]));
+            }
+        }
 
         // 5. 变量/函数替换
         Map<String, String> resolved = new LinkedHashMap<>();

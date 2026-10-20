@@ -5,6 +5,7 @@
 - 直接读写 JMeter `.jmx`：未改动的部分逐字节保持原样，保存后 JMeter 5.x 可正常打开
 - 兼容 `com.yajad.jmeter.sampler.DubboSampler`（参数格式、Dubbo Defaults 继承规则、泛化调用方式与插件一致），也能读取/发送 `ningyu` Dubbo 插件的请求
 - 支持 `${变量}`、常用 JMeter 函数（`__Random`/`__time`/`__timeShift`/`__UUID`/`__RandomString`/`__counter`/`__digest` 等）、用户定义变量、CSV 数据文件、BeanShell/JSR223 前置与后置脚本（`vars`/`props`/`log`/`prev`/`sampler`/`ctx`，`RpcContext.setAttachment` 可用）
+- 请求可配置 RPCContext 附件（“RPCContext”页签，名称/值支持 `${变量}` 和函数，在前置脚本之后替换，脚本设置的同名附件优先）；保存为请求上的 `DubboLite.rpcContext` 属性，JMeter 能正常打开但插件不会发送
 - 支持 dandelion 插件的 JavaSampler Dubbo 请求（`mm.jmeter.duser.SgrDubbo` / `DubboApp`，含 appidKey 签名）
 - 支持 ZMS 消息（`com.zto.zmsjmeter.ZMSSampler`，syncSend / sendOneWay）；ZMS 客户端放在 `lib-zms/`，用独立类加载器加载，不与 Dubbo 依赖冲突
 - 调用中可随时中断（点“中断”或按 `Esc`）：Dubbo 中断等待中的调用线程，ZMS 取消发送；被中断的请求不执行后置脚本

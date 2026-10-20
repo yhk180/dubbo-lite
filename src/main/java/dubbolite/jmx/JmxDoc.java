@@ -40,6 +40,11 @@ public final class JmxDoc {
     /** 可以从 Dubbo Defaults 继承的连接字段 */
     public static final String[] CONN_FIELDS = {"registryProtocol", "registryAddress", "registryGroup", "rpcProtocol",
             "timeout", "retries", "version", "cluster", "group", "connections", "loadbalance"};
+    /**
+     * 请求的 RPCContext 附件（本工具扩展的属性，结构同“用户定义的变量”）：JMeter 能正常加载并原样保留，
+     * 但 yajad/ningyu 插件不会读取它，JMeter 中需要用前置脚本 RpcContext.getContext().setAttachment(...) 实现
+     */
+    public static final String RPC_CONTEXT = "DubboLite.rpcContext";
 
     static {
         String[][] y = {{"registryProtocol", "Yajad.registryProtocol"}, {"registryAddress", "Yajad.registryAddress"},
@@ -316,8 +321,42 @@ public final class JmxDoc {
     }
 
     public static List<String[]> variables(TNode t) {
+        return arguments(argumentsCollection(t, false));
+    }
+
+    /** 请求上配置的 RPCContext 附件 [名称, 值] */
+    public static List<String[]> rpcContext(TNode t) {
+        Xml.Node holder = propNode(t.el, RPC_CONTEXT);
+        return arguments(holder == null ? null : propNode(holder, "Arguments.arguments"));
+    }
+
+    private static void setRpcContext(TNode t, JsonArray rows) {
+        Xml.Node holder = propNode(t.el, RPC_CONTEXT);
+        boolean empty = true;
+        for (JsonElement r : rows) {
+            JsonObject o = r.getAsJsonObject();
+            if (o.has("name") && !o.get("name").getAsString().trim().isEmpty()) {
+                empty = false;
+            }
+        }
+        if (empty) {
+            // 没有附件时不留空属性，未使用此功能的文件保存后保持原样
+            if (holder != null) {
+                t.el.remove(holder);
+            }
+            return;
+        }
+        if (holder == null) {
+            holder = Xml.parseFragment("<elementProp name=\"" + RPC_CONTEXT + "\" elementType=\"Arguments\" "
+                    + "guiclass=\"ArgumentsPanel\" testclass=\"Arguments\" testname=\"RPCContext\">\n"
+                    + "  <collectionProp name=\"Arguments.arguments\"/>\n</elementProp>");
+            t.el.append(holder);
+        }
+        setArguments(propNode(holder, "Arguments.arguments"), rows);
+    }
+
+    private static List<String[]> arguments(Xml.Node coll) {
         List<String[]> list = new ArrayList<>();
-        Xml.Node coll = argumentsCollection(t, false);
         if (coll == null) {
             return list;
         }
@@ -352,7 +391,10 @@ public final class JmxDoc {
     }
 
     private static void setVariables(TNode t, JsonArray rows) {
-        Xml.Node coll = argumentsCollection(t, true);
+        setArguments(argumentsCollection(t, true), rows);
+    }
+
+    private static void setArguments(Xml.Node coll, JsonArray rows) {
         List<Xml.Node> old = new ArrayList<>(coll.children);
         int i = 0;
         for (JsonElement r : rows) {
@@ -432,6 +474,9 @@ public final class JmxDoc {
                 for (Map.Entry<String, String> e : dubboFields(t).entrySet()) {
                     props.addProperty(e.getKey(), e.getValue());
                 }
+                if ("dubbo".equals(t.kind)) {
+                    props.add("rpcContext", rowsJson(rpcContext(t)));
+                }
                 break;
             case "pre":
             case "post":
@@ -449,14 +494,7 @@ public final class JmxDoc {
                 break;
             case "plan":
             case "vars":
-                JsonArray arr = new JsonArray();
-                for (String[] kv : variables(t)) {
-                    JsonObject v = new JsonObject();
-                    v.addProperty("name", kv[0]);
-                    v.addProperty("value", kv[1]);
-                    arr.add(v);
-                }
-                props.add("variables", arr);
+                props.add("variables", rowsJson(variables(t)));
                 if ("plan".equals(t.kind)) {
                     props.addProperty("comments", t.prop("TestPlan.comments"));
                 }
@@ -508,6 +546,17 @@ public final class JmxDoc {
         return o;
     }
 
+    private static JsonArray rowsJson(List<String[]> rows) {
+        JsonArray arr = new JsonArray();
+        for (String[] kv : rows) {
+            JsonObject v = new JsonObject();
+            v.addProperty("name", kv[0]);
+            v.addProperty("value", kv[1]);
+            arr.add(v);
+        }
+        return arr;
+    }
+
     // ------------------------------------------------------------------ mutate
 
     public void update(int nodeId, JsonObject patch) {
@@ -528,6 +577,12 @@ public final class JmxDoc {
                 switch (t.kind) {
                     case "dubbo":
                     case "defaults":
+                        if ("rpcContext".equals(key)) {
+                            if ("dubbo".equals(t.kind)) {
+                                setRpcContext(t, e.getValue().getAsJsonArray());
+                            }
+                            break;
+                        }
                         String value = e.getValue().getAsString();
                         if ("dandelion".equals(t.flavor)) {
                             Dandelion.update(t, key, value);
